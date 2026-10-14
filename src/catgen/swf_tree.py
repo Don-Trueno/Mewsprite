@@ -28,12 +28,6 @@ class PlacedObject:
                 raise RuntimeError("Invalid PlaceObject2")
 
 def describeSkippedTag(tag: swf.SWF.Tag) -> dict:
-    """Describe a tag we cannot turn into a part, for the animation metadata.
-
-    Step 4: objects we cannot handle yet (PlaceObject3, ...) are
-    skipped instead of guessed at, but the skip is recorded so it stays
-    traceable in ``reusable/anims/<anim>.json``.
-    """
     record = {
         "tag": "UNSUPPORTED:" + tag.type_to_string(),
         "type": int(tag.type),
@@ -136,10 +130,7 @@ class SWF_Tree:
                     displist.remove(ro2.depth)
 
                 else:
-                    # Step 4: skip parts we cannot handle yet instead of
-                    # guessing, and keep a record of every skip.
-                    logging.warning(
-                        f"Unhandled tag! '{tag.type_to_string()}' in '{frame.name}'")
+
                     displist.skipped.append(describeSkippedTag(tag))
 
             node.frames.append(copy.deepcopy(displist))

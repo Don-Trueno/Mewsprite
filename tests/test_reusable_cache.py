@@ -165,6 +165,7 @@ class ShapeCacheRoundTripTests(unittest.TestCase):
     def test_animation_cache_round_trip(self):
         payload = {
             "anim_name": "megaslapF",
+            "metadata_version": reusable.ANIM_CACHE_VERSION,
             "tag_pool": ["head", "body", "other_head"],
             "frames": {
                 "0": [{"depth": 1, "tag": "body", "transform": [1, 0, 0, 1, 0, 0]}],
@@ -179,6 +180,20 @@ class ShapeCacheRoundTripTests(unittest.TestCase):
 
         loaded = reusable.load_anim_cache("megaslapF")
         self.assertEqual(loaded, payload)
+
+    def test_stale_metadata_version_is_ignored(self):
+        """Metadata from an older pipeline would render without its tints."""
+        payload = {
+            "anim_name": "staleF",
+            "metadata_version": reusable.ANIM_CACHE_VERSION - 1,
+            "tag_pool": ["body"],
+            "frames": {"0": [{"depth": 1, "tag": "body",
+                              "transform": [1, 0, 0, 1, 0, 0]}]},
+        }
+        reusable.save_anim_cache("staleF", payload)
+
+        self.assertIsNone(reusable.load_anim_cache("staleF"),
+                          "an older metadata version must not be reused")
 
     def test_missing_animation_cache_returns_none(self):
         self.assertIsNone(reusable.load_anim_cache("doesNotExist"))

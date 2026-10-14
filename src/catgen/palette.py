@@ -5,7 +5,12 @@ from ..util import resource_sync as sync
 from PIL import Image
 logging.getLogger("pillow").setLevel(logging.WARNING)
 
+from typing import cast
+
 from ..util import svg_tools as svg
+
+#: what `PixelAccess` yields for an RGB image
+RGB = tuple[int, int, int]
 
 PALETTE_PATH = "./data/textures/palette.png"
 
@@ -21,17 +26,22 @@ class Palette:
     
         return self.colors[int(red / 16)]
 
-def palettesProduce(filepath: str):
+def palettesProduce(filepath: str) -> list[Palette]:
     with Image.open(filepath) as img:
         converted = img.convert("RGB")
         pixels = converted.load()
         height = converted.height
 
+    # PIL only returns None when the image could not be loaded at all
+    if pixels is None:
+        raise RuntimeError(f"could not read the pixels of '{filepath}'")
+
     palettes: list[Palette] = []
     for y in range(height):
         cur: list[tuple[int, int, int]] = []
         for x in range(16):
-            cur.append(pixels[x, y])
+            # an RGB image always yields three channels, which PIL's stubs cannot say
+            cur.append(cast(RGB, pixels[x, y]))
 
         palettes.append(Palette(cur))
 

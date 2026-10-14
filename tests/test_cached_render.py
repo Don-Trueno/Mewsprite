@@ -24,37 +24,66 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def make_frame(entries, skipped=()):
     frame = animations.CatFrame()
-    for tag, (xoffset, yoffset, depth) in entries.items():
+    for tag, spec in entries.items():
+        xoffset, yoffset, depth = spec[0], spec[1], spec[2]
+        alpha = spec[3] if len(spec) > 3 else None
         matrix = swf.Matrix()
         matrix.xoffset = xoffset
         matrix.yoffset = yoffset
-        frame.used.setdefault(tag, []).append((matrix, depth))
+        frame.used.setdefault(tag, []).append(
+            (matrix, depth, None if alpha is None else color_transform(alpha)))
     frame.skipped = list(skipped)
     return animations.finalizeFrame(frame)
 
 
+def cxform_fields(value):
+    cxform = value[2] if len(value) > 2 else None
+    if cxform is None:
+        return None
+    return (cxform.redMult, cxform.greenMult, cxform.blueMult, cxform.alphaMult,
+            cxform.redAdd, cxform.greenAdd, cxform.blueAdd, cxform.alphaAdd)
+
+
 def matrix_fields(value):
-    matrix, depth = value
+    matrix, depth = value[0], value[1]
     return (round(matrix.xscale, 6), round(matrix.skew1, 6), round(matrix.skew2, 6),
             round(matrix.yscale, 6), round(matrix.xoffset, 6), round(matrix.yoffset, 6), depth)
+
+
+def color_transform(alpha):
+    cx = swf.CXFORM()
+    cx.alphaMult = alpha
+    return cx
+
+
+def frame_entry(entry):
+    """The metadata dict for one `(depth, tag, transform, colorTransform)` entry."""
+    depth, tag, matrix, cxform = entry
+    out = {"depth": depth, "tag": tag}
+    if matrix is None:
+        out["transform"] = None
+        out["note"] = "skipped"
+    else:
+        out["transform"] = list(matrix)
+    if cxform is not None:
+        out["colorTransform"] = cxform
+    return out
 
 
 class FrameCacheRoundTripTests(unittest.TestCase):
     def test_rebuilt_frames_match_the_written_metadata(self):
         anim = [
-            make_frame({"body": (1.0, 2.0, 7), "head_smile": (3.0, 4.0, 13)}),
+            make_frame({"body": (1.0, 2.0, 7), "head_smile": (3.0, 4.0, 13),
+                        "headblend_mad": (1.5, 2.5, 5, 0.5)}),
             make_frame({"body": (5.0, 6.0, 7), "head_smile": (7.0, 8.0, 13),
-                        "other_head": (9.0, 10.0, 27)}),
+                        "other_head": (9.0, 10.0, 27), "tail": (1.0, 1.0, 3, 0.25)}),
             make_frame({"body": (11.0, 12.0, 7)},
                        skipped=[{"tag": "UNSUPPORTED:PlaceObject3", "note": "skipped", "depth": 42}]),
         ]
 
         tag_pool, frames_info = custom_cats.extract_anim_tag_pool_and_frames_info(anim)
         payload = {"anim_name": "unitTestF", "tag_pool": tag_pool, "frames": {
-            str(i): [{"depth": d, "tag": t,
-                      **({"transform": None, "note": "skipped"} if m is None
-                         else {"transform": list(m)})}
-                     for d, t, m in frame]
+            str(i): [frame_entry(entry) for entry in frame]
             for i, frame in enumerate(frames_info)
         }}
 
@@ -68,6 +97,10 @@ class FrameCacheRoundTripTests(unittest.TestCase):
                     [matrix_fields(v) for v in original.used[tag]],
                     [matrix_fields(v) for v in restored.used[tag]],
                     f"frame {index} tag {tag}")
+                self.assertEqual(
+                    [cxform_fields(v) for v in original.used[tag]],
+                    [cxform_fields(v) for v in restored.used[tag]],
+                    f"frame {index} tag {tag}: the color transform was lost")
             self.assertEqual(original.face, restored.face)
             self.assertEqual(set(original.extra), set(restored.extra))
             for tag in original.extra:
@@ -104,11 +137,10 @@ class CompleteCacheTests(unittest.TestCase):
             "anim_name": anim_name,
             "overlay_mode": overlay_mode,
             "complete": bool(complete),
+            "metadata_version": reusable.ANIM_CACHE_VERSION,
             "tag_pool": tag_pool,
             "frames": {
-                str(i): [{"depth": d, "tag": t,
-                          **({"transform": None, "note": "skipped"} if m is None else {"transform": list(m)})}
-                         for d, t, m in frame]
+                str(i): [frame_entry(entry) for entry in frame]
                 for i, frame in enumerate(frames_info)},
         }
         reusable.save_anim_cache(anim_name, payload)

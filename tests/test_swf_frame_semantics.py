@@ -67,7 +67,22 @@ def matrix_bytes(translate=(0.0, 0.0), scale=(1.0, 1.0), rotate=(0.0, 0.0)) -> b
     return writer.bytes()
 
 
-def place_object2(depth, character=None, name=None, matrix=None, move=False) -> tuple[int, bytes]:
+def cxform_bytes(mult=1.0, add=0, nbits=9) -> bytes:
+    """Encode a CXFORMWITHALPHA exactly the way `SWF.parseCXFORMWITHALPHA` reads it."""
+    writer = BitWriter()
+    writer.u(1 if add else 0, 1)
+    writer.u(1, 1)  # hasMult
+    writer.u(nbits, 4)
+    for _ in range(4):
+        writer.s(int(round(mult * 256)), nbits)
+    if add:
+        for _ in range(4):
+            writer.s(int(add), nbits)
+    return writer.bytes()
+
+
+def place_object2(depth, character=None, name=None, matrix=None, move=False,
+                  cxform=None) -> tuple[int, bytes]:
     flags = 0
     if move:
         flags |= 0b00000001
@@ -75,6 +90,8 @@ def place_object2(depth, character=None, name=None, matrix=None, move=False) -> 
         flags |= 0b00000010
     if matrix is not None:
         flags |= 0b00000100
+    if cxform is not None:
+        flags |= 0b00001000
     if name is not None:
         flags |= 0b00100000
 
@@ -83,6 +100,8 @@ def place_object2(depth, character=None, name=None, matrix=None, move=False) -> 
         data += struct.pack("<H", character)
     if matrix is not None:
         data += matrix
+    if cxform is not None:
+        data += cxform
     if name is not None:
         data += name.encode("utf-8") + b"\x00"
 
@@ -229,6 +248,108 @@ class UnsupportedTagTests(unittest.TestCase):
         frames = frames_of(build_tree(sprite), 1)
         self.assertEqual(len(frames[0].skipped), 1)
         self.assertEqual(frames[1].skipped, [])
+
+
+class RemovedPartStaysHiddenTests(unittest.TestCase):
+    """A removed part must not come back through the legacy `CatFrame` fallback.
+
+    `CatFrame` initialises every part to an identity matrix at depth 0.  Reading
+    that placeholder as a placement resurrected whatever `RemoveObject2` had just
+    hidden and drew it at the frame origin, unscaled.
+    """
+
+    def _part_keys(self):
+        return ("head", "body", "arm1", "arm2", "leg1", "leg2", "tail")
+
+    def test_removed_head_is_not_resurrected(self):
+        from src.catgen import animations
+        from src import custom_cats
+
+        sprite = define_sprite(1, [
+            [place_object2(5, character=100, name="body", matrix=matrix_bytes((1.0, 1.0))),
+             place_object2(7, character=101, name="head", matrix=matrix_bytes((2.0, 2.0)))],
+            [remove_object2(7)],
+        ])
+
+        frames = frames_of(build_tree(sprite), 1)
+        cat_frames = [animations.catFrameFromObjs(f.objs, f.skipped) for f in frames]
+
+        placed = custom_cats.frame_used_tag_entries(cat_frames[0], "head")
+        self.assertEqual([tag for tag, _m, _d in placed], ["head"])
+
+        self.assertEqual(
+            custom_cats.frame_used_tag_entries(cat_frames[1], "head"), [],
+            "the removed head was resurrected from the CatFrame placeholder")
+
+        self.assertEqual(custom_cats.frame_used_value(cat_frames[1], "head"), [])
+
+    def test_body_still_found_when_it_is_really_placed(self):
+        from src.catgen import animations
+        from src import custom_cats
+
+        sprite = define_sprite(1, [
+            [place_object2(7, character=101, name="head", matrix=matrix_bytes((2.0, 2.0)))],
+        ])
+
+        frames = frames_of(build_tree(sprite), 1)
+        cat_frame = animations.catFrameFromObjs(frames[0].objs, frames[0].skipped)
+
+        self.assertEqual(
+            [tag for tag, _m, _d in custom_cats.frame_used_tag_entries(cat_frame, "head")],
+            ["head"])
+        self.assertEqual(
+            custom_cats.frame_used_tag_entries(cat_frame, "body"), [],
+            "an unplaced part must not be invented")
+
+
+class ColorTransformPlacementTests(unittest.TestCase):
+    """The colorTransform on a placement reaches `CatFrame` (step 5)."""
+
+    def test_parsed_color_transform_is_kept(self):
+        from src.catgen import animations
+
+        sprite = define_sprite(1, [
+            [place_object2(7, character=100, name="body",
+                           matrix=matrix_bytes((1.0, 1.0)),
+                           cxform=cxform_bytes(mult=0.5))],
+        ])
+
+        frames = frames_of(build_tree(sprite), 1)
+        cat_frame = animations.catFrameFromObjs(frames[0].objs, frames[0].skipped)
+
+        matrix, depth, cxform = cat_frame.used["body"][0]
+        self.assertEqual(depth, 7)
+        self.assertIsNotNone(cxform, "the parsed color transform was dropped")
+        self.assertAlmostEqual(cxform.redMult, 0.5, places=3)
+        self.assertAlmostEqual(cxform.alphaMult, 0.5, places=3)
+
+    def test_placement_without_a_color_transform_has_none(self):
+        from src.catgen import animations
+
+        sprite = define_sprite(1, [
+            [place_object2(7, character=100, name="body", matrix=matrix_bytes((1.0, 1.0)))],
+        ])
+
+        frames = frames_of(build_tree(sprite), 1)
+        cat_frame = animations.catFrameFromObjs(frames[0].objs, frames[0].skipped)
+
+        self.assertIsNone(cat_frame.used["body"][0][2])
+
+    def test_color_add_is_read_back(self):
+        from src.catgen import animations
+
+        sprite = define_sprite(1, [
+            [place_object2(7, character=100, name="body",
+                           matrix=matrix_bytes((1.0, 1.0)),
+                           cxform=cxform_bytes(mult=0.75, add=40))],
+        ])
+
+        frames = frames_of(build_tree(sprite), 1)
+        cat_frame = animations.catFrameFromObjs(frames[0].objs, frames[0].skipped)
+
+        cxform = cat_frame.used["body"][0][2]
+        self.assertAlmostEqual(cxform.alphaMult, 0.75, places=3)
+        self.assertEqual(cxform.redAdd, 40)
 
 
 if __name__ == "__main__":

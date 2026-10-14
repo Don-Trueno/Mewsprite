@@ -92,7 +92,7 @@ class SecondCatTimelineTests(unittest.TestCase):
         self.assertEqual(len(frames_info), len(self.anim))
         first_other = next(
             (i for i, frame in enumerate(frames_info)
-             if any(tag.startswith("other_") for _depth, tag, _matrix in frame)),
+             if any(tag.startswith("other_") for _depth, tag, _matrix, _cx in frame)),
             None,
         )
         self.assertEqual(first_other, 3)
@@ -157,17 +157,26 @@ class SecondCatResolverTests(unittest.TestCase):
         self.assertIs(first, third)
         self.assertEqual(len(self.calls), 1, "the second cat must only be resolved once")
 
+        assert first is not None
         cat2, names, explicit, defaults = first
         self.assertEqual(cat2.id, "ThiefCat")
         self.assertFalse(explicit)
-        self.assertEqual(len(defaults), 3)
+        # an equipment selection is always exactly the three armour slots
+        self.assertEqual(len(names), len(custom_cats.EQUIP_SLOTS))
+        self.assertEqual(len(defaults), len(custom_cats.EQUIP_SLOTS))
 
     def test_explicit_equipment_is_reported(self):
         resolver = custom_cats.SecondCatResolver(self.catList, "ThiefCat", "custom", ("Hat", None, None))
-        cat2, names, explicit, _defaults = resolver.resolve()
+        resolved = resolver.resolve()
+        self.assertIsNotNone(resolved)
+
+        assert resolved is not None
+        cat2, names, explicit, _defaults = resolved
 
         self.assertEqual(cat2.id, "ThiefCat")
         self.assertTrue(explicit)
+        # the three armour slots are filled; a weapon or a trinket has no place
+        # in the list at all
         self.assertEqual(names, ("Hat", None, None))
 
     def test_unknown_id_is_reported_without_prompting(self):

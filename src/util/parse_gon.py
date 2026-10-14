@@ -299,5 +299,5 @@ def gonProduce(filepath: str):
 gonMap = sync.MapSync[Any](gonProduce, gonOnWait, gonOnWaitEnd)
 
 # gons are cached, cause these things get REUSED
-def parse_gon(filepath: str):
+def parse_gon(filepath: str)->dict[str,Any]:
     return gonMap.get(filepath, filepath)

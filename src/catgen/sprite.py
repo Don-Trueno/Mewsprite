@@ -6,6 +6,7 @@ import copy
 import io
 import os
 import uuid
+import logging
 
 from typing import Sequence
 
@@ -13,6 +14,8 @@ from PIL import Image as PILImage
 from wand.color import Color
 from wand.image import Image
 
+logging.getLogger("pillow").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 class Sprite:
     @staticmethod
@@ -78,6 +81,11 @@ class Sprite:
             with Image(blob=sprite.compile().encode("utf-8"), background=bg, resolution=72) as img:
                 png = img.make_blob("png")
 
+        if png is None:
+            logger.warning(
+                "ImageMagick produced no PNG data while measuring sprite bounds")
+            return (0.0, 0.0, 0.0, 0.0)
+
         with PILImage.open(io.BytesIO(png)) as rgba_img:
             alpha = rgba_img.convert("RGBA").getchannel("A")
             bbox = alpha.getbbox()
@@ -102,7 +110,7 @@ class Sprite:
             raise ValueError("Crop bounds are empty after clamping to the SVG dimensions")
 
         out = copy.deepcopy(self)
-        root = out.data.data
+        root = out.document().data
         crop_w = right - left
         crop_h = bottom - top
 
@@ -121,49 +129,63 @@ class Sprite:
     def __init__(self, data: svg.SvgData):
         self.data = data
 
+    def document(self) -> svg.SvgData:
+        """The parsed SVG document, or a clear error once the sprite was freed.
+
+        `data` is optional only so `free()` can drop the tree; every method here
+        needs a live one.
+        """
+        if self.data is None:
+            raise RuntimeError("this sprite has been freed")
+        return self.data
+
     def getImportantComponents(self) -> list[svg.SvgData.Composite]:
         # <svg> is not important
-        return self.data.data.subcomponents
+        return self.document().data.subcomponents
 
     def getDimensions(self) -> tuple[float, float]:
-        w = float(self.data.data.getField("width").removesuffix("px"))
-        h = float(self.data.data.getField("height").removesuffix("px"))
+        root = self.document().data
+        w = float(root.getField("width").removesuffix("px"))
+        h = float(root.getField("height").removesuffix("px"))
 
         return (w, h)
 
     def applyTransform(self, xform: swf.CXFORM | swf.Matrix | None):
-        if (xform == None):  # makes things a bit simpler
+        if (xform is None):  # makes things a bit simpler
             return self
 
-        def applyCXFORM(data: svg.SvgData.Composite):
-            if ("fill=\"#" in data.header):
-                r, g, b = Sprite.rgbFromSVG(data.getField("fill"))
-                astr = data.getField("opacity")
-                a = float(astr if astr != "" else 1.0) * 255.0
-
-                nr, ng, nb, na = xform.transform(
-                    float(r), float(g), float(b), a)
-                data.setField("fill", Sprite.rgbToSVG(
-                    int(nr), int(ng), int(nb)))
-
-                if (na != 255.0 or astr != ""):
-                    data.setField("opacity", str(na / 255.0))
-
-            if ("stop-color=\"#" in data.header):
-                # @TODO handle opacity?
-                r, g, b = Sprite.rgbFromSVG(data.getField("stop-color"))
-                nr, ng, nb, na = xform.transform(
-                    float(r), float(g), float(b), 1.0)
-                data.setField(
-                    "stop-color", Sprite.rgbToSVG(int(nr), int(ng), int(nb)))
-
         if isinstance(xform, swf.CXFORM):
-            self.data.forEach(applyCXFORM)
+            # bound before the closure so the narrowed type is what it sees
+            cxform = xform
 
-        else:
-            comp = svg.SvgData.Composite(
-                f"<g transform=\"{Sprite.matrixToSVG(xform)}\">\n", self.getImportantComponents())
-            self.data.data.subcomponents = [comp]
+            def applyCXFORM(data: svg.SvgData.Composite):
+                if ("fill=\"#" in data.header):
+                    r, g, b = Sprite.rgbFromSVG(data.getField("fill"))
+                    astr = data.getField("opacity")
+                    a = float(astr if astr != "" else 1.0) * 255.0
+
+                    nr, ng, nb, na = cxform.transform(
+                        float(r), float(g), float(b), a)
+                    data.setField("fill", Sprite.rgbToSVG(
+                        int(nr), int(ng), int(nb)))
+
+                    if (na != 255.0 or astr != ""):
+                        data.setField("opacity", str(na / 255.0))
+
+                if ("stop-color=\"#" in data.header):
+                    # @TODO handle opacity?
+                    r, g, b = Sprite.rgbFromSVG(data.getField("stop-color"))
+                    nr, ng, nb, na = cxform.transform(
+                        float(r), float(g), float(b), 1.0)
+                    data.setField(
+                        "stop-color", Sprite.rgbToSVG(int(nr), int(ng), int(nb)))
+
+            self.document().forEach(applyCXFORM)
+            return self
+
+        comp = svg.SvgData.Composite(
+            f"<g transform=\"{Sprite.matrixToSVG(xform)}\">\n", self.getImportantComponents())
+        self.document().data.subcomponents = [comp]
 
         return self
 
@@ -174,7 +196,7 @@ class Sprite:
         rebaseCenter.yoffset += dy / 2.0
 
         # self.applyTransform(rebaseCenter)
-        return self.data.compile()
+        return self.document().compile()
 
     def free(self):
         """Drop this sprite's parsed SVG tree.
@@ -202,10 +224,10 @@ def mergeSprites(sprites: list[Sprite], mwid: float = 200.0, mhig: float = 200.0
         return Sprite(svg.SvgData("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n", svg.SvgData.Composite(svgTag, [])))
 
     out = Sprite(svg.SvgData(
-        sprites[0].data.xmlVersion, svg.SvgData.Composite(svgTag, [])))
+        sprites[0].document().xmlVersion, svg.SvgData.Composite(svgTag, [])))
 
     for sprite in sprites:
-        out.data.data.subcomponents += sprite.getImportantComponents()
+        out.document().data.subcomponents += sprite.getImportantComponents()
 
     return out
 
@@ -311,7 +333,7 @@ def spriteFromPlacedObjects(dumpdir: str, swfTree: tree.SWF_Tree, objs: Sequence
                 comp.setField("transform", ic[0].getField("transform"))
                 comp.subcomponents = ic[0].subcomponents
 
-            sprite.data.data.subcomponents = [comp]
+            sprite.document().data.subcomponents = [comp]
             sprites.append(sprite)
 
     clips = sorted(clips, key=lambda dn: dn[0], reverse=True)
@@ -329,9 +351,9 @@ def spriteFromPlacedObjects(dumpdir: str, swfTree: tree.SWF_Tree, objs: Sequence
             if (obj.depth >= clipStart and obj.depth <= clipEnd):
                 comp = svg.SvgData.Composite(
                     f"<g clip-path=\"url(#{id})\">\n", sprite.getImportantComponents())
-                sprite.data.data.subcomponents = [comp]
+                sprite.document().data.subcomponents = [comp]
 
-        sprite.data.data.removeRedundantGs()
+        sprite.document().data.removeRedundantGs()
         sprites.append(sprite)
 
     return mergeSprites(sprites)

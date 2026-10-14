@@ -6,10 +6,11 @@ from .catgen import sprite
 from .catgen import animations
 from .catgen import palette
 from .catgen import reusable
-from import_paths import *
+from src.import_paths import *
 
 from .util import parse_gon as gon
 from .util import ffdec_tools as ffdec
+from .util import svg_tools
 from .util import svg_tools as svg
 
 from . import items
@@ -19,7 +20,7 @@ import io
 import os
 import shutil
 import logging
-from typing import Any
+from typing import Any, Iterable, Iterator, Mapping, Sequence, overload
 
 from PIL import Image as PILImage
 from wand.image import Image
@@ -54,17 +55,38 @@ BOUNDS_HALO = 4.0
 GIF_FRAME_DURATION_MS = 20
 
 _FACE_POSE_CACHE: dict[str, dict[str, Any]] | None = None
-_HEAD_FACE_CACHE: dict[tuple[Any, ...], Any] = {}
+_HEAD_FACE_CACHE: dict[tuple[Any, ...], "CatFace"] = {}
 _HEAD_POSE_CACHE: dict[tuple[Any, ...], sprite.Sprite] = {}
 _COMPONENT_CACHE: dict[tuple[Any, ...], sprite.Sprite] = {}
 _CHARACTER_CACHE: dict[str, sprite.Sprite] = {}
+_ITEM_SPRITE_CACHE: dict[tuple[Any, ...], sprite.Sprite] = {}
 
 # Type
 FloatMatrix = tuple[float, float, float, float, float, float]
+
+#: A cat's equipment is exactly the three worn armor slots.  Nothing else is
+#: ever part of a cat: a weapon and a trinket are standalone parts that the
+#: animation places, and only the animation metadata says whether a cat has any.
+EQUIP_SLOTS: tuple[str, str, str] = ("head", "face", "neck")
+
+#: the two handheld slots.  A cat holds no such thing by itself; the slots only
+#: name the parts an animation's ``weapon`` / ``trinket`` objects refer to.
+HANDHELD_SLOTS: tuple[str, str] = ("weapon", "trinket")
+
+#: worn armor, in slot order
 EquipNames = tuple[str | None, str | None, str | None]
 
+#: a weapon and a trinket, in slot order
+HandheldNames = tuple[str | None, str | None]
 
-def getCatTree(catTree: swf.SWF_Tree, name: str):
+#: item a cat's animation shows when its character file names no trinket
+DEFAULT_TRINKET = "Chicken"
+
+#: spellings that mean "nothing in this slot"
+NONE_TOKENS = {"none", "null", "-"}
+
+
+def getCatTree(catTree: swf.SWF_Tree, name: str) -> swf.SWF_Tree.SpriteNode:
     node = catTree.get(name)
     if isinstance(node, swf.SWF_Tree.SpriteNode):
         return node
@@ -78,12 +100,12 @@ def _load_face_poses() -> dict[str, dict[str, Any]]:
     if _FACE_POSE_CACHE is not None:
         return _FACE_POSE_CACHE
 
-    face_data = gon.parse_gon(CATGEN_GON).get("faces", {})
-    if not isinstance(face_data, dict):
-        face_data = {}
+    faces = gon.parse_gon(CATGEN_GON).get("faces", {})
+    if not isinstance(faces, dict):
+        faces = {}
 
     cleaned: dict[str, dict[str, Any]] = {}
-    for name, pose in face_data.items():
+    for name, pose in faces.items():
         if isinstance(pose, dict):
             cleaned[str(name)] = dict(pose)
         else:
@@ -180,6 +202,10 @@ class CustomCat:
 
     texture = 1
     palette = 1
+
+    #: sprite symbol the mouth artwork comes from; every cat so far uses the
+    #: default one, and a character file may override it
+    mouth_sprite = "CatMouth"
 
     body: Part
     tail: Part
@@ -296,7 +322,45 @@ class FacePose:
         self.back = gondata.setdefault("back", False)
 
 
+def _as_slots(values: Sequence[str | None], slots: Sequence[str]) -> list[str | None]:
+    """Normalise a selection to one entry per slot in ``slots``."""
+    items: list[str | None] = list(values)[:len(slots)]
+    while len(items) < len(slots):
+        items.append(None)
+    return items
+
+
+def _normalise_tokens(names: Sequence[str | None]) -> list[str | None]:
+    """Turn blanks and the ``none`` spellings of a selection into ``None``."""
+    items: list[str | None] = []
+    for item in names:
+        token = "" if item is None else str(item).strip()
+        items.append(None if not token or token.lower()
+                     in NONE_TOKENS else token)
+    return items
+
+
+def normalise_equipment(names: Sequence[str | None] | None) -> EquipNames | None:
+    """Normalise an equipment selection to exactly the three armor slots.
+
+    ``None`` stays ``None``, meaning "the cat's own default".  Blank entries and
+    the ``none`` spelling mean the cat wears nothing there.
+    """
+    if names is None:
+        return None
+
+    head, face, neck = _as_slots(_normalise_tokens(names), EQUIP_SLOTS)
+    return (head, face, neck)
+
+
 class CatEquipment:
+    """The three worn armor slots of one cat, as sprites.
+
+    Only the armor lives here: it is drawn *on* the cat, so it belongs to the
+    cat and is part of each cached cat part's name.  A weapon or a trinket is not
+    part of a cat at all -- see :class:`ItemPool`.
+    """
+
     head_front: sprite.Sprite | None
     head_back: sprite.Sprite | None
 
@@ -364,10 +428,47 @@ def _get_cached_cat_component(partDir: str, catTree: swf.SWF_Tree, node_name: st
 
     part = catpart.getCatComponent(
         partDir, catTree, getCatTree(catTree, node_name), frame, texture)
-    palette.applyPalette(palette.loadPalettes(
-        "./data/textures/palette.png")[cat.palette], part.data)
+    if part.data is None:
+        raise RuntimeError(f"cat component '{node_name}' has no SVG data")
+    palette.applyPalette(
+        palette.loadPalettes("./data/textures/palette.png")[cat.palette], part.data)
     _COMPONENT_CACHE[key] = copy.deepcopy(part)
     return copy.deepcopy(part)
+
+
+def _mouth_svg_data(component: sprite.Sprite) -> svg_tools.SvgData:
+    """The SVG document of a mouth sprite, which every mouth layer must have."""
+    data = component.data
+    if data is None:
+        raise RuntimeError("mouth component has no SVG data")
+    return data
+
+
+def mirror_sprite_x(component: sprite.Sprite) -> None:
+    """Mirror a part's artwork horizontally, keeping its placement transform.
+
+    The placement from `CatHeadPlacements` is the outermost `<g>` of the sprite.
+    Overwriting that wrapper's transform with the mirror throws the placement
+    away: for the mouth that lost its `y +7.5` offset, so a left-looking face drew
+    the mouth 7.5 units too high.  The mirror therefore goes *inside* the
+    placement wrapper, leaving the placement to apply on top of it.
+    """
+    data = component.data
+    if data is None or data.data is None:
+        return
+
+    root = data.data
+    if not root.subcomponents:
+        return
+
+    placement = root.subcomponents[0]
+    if placement.getTagname() != "g":
+        return
+
+    placement.subcomponents = [svg_tools.SvgData.Composite(
+        '<g transform="matrix(-1.0, 0.0, 0.0, 1.0, 0.0, 0.0)">\n',
+        placement.subcomponents,
+    )]
 
 
 #: which sprite symbol provides the artwork of each equip-independent cat part
@@ -400,11 +501,21 @@ def _get_cat_part(cat: CustomCat, partKey: str, partDir: str, palettes: list[pal
 
 def _head_expression(frame: animations.CatFrame, tagName: str) -> str | None:
     """Face name a head tag resolves to, used both for the pose and the cache name."""
-    if tagName.startswith("head_"):
-        variant = tagName.removeprefix("head_")
-        if variant:
-            return variant
+    expression = animations.headTagExpression(tagName)
+    if expression:
+        return expression
     return frame.face or None
+
+
+def tag_family_prefixes(key: str) -> tuple[str, ...]:
+    """Every tag prefix that belongs to ``key``'s family.
+
+    Normally that is just ``key_``; the head is special because its layers also
+    arrive as ``headblend_<pose>``.
+    """
+    if key == "head":
+        return animations.HEAD_TAG_FAMILIES
+    return (key + "_",)
 
 
 def _build_cat_head(cat: CustomCat, expression: str | None, equip: CatEquipment, partDir: str, palettes: list[palette.Palette], catTree: swf.SWF_Tree) -> sprite.Sprite:
@@ -425,6 +536,11 @@ def _get_cat_head(
     """Head + equipment sprite for one pose, reused through reusable/shapes.
 
     Cached as ``<cat-id>-head<-表情><-装备>.svg``.
+
+    The weapon and the trinket are *not* part of this sprite.  Their placement
+    changes with every animation frame, which the part file name cannot express,
+    so they are added as their own frame layers instead (see
+    :func:`_animation_item_plan_entries`).
     """
     cacheName = reusable.shape_cache_name(
         cat.id, "head", expression=expression, equip=equipNames, defaults=equipDefaults)
@@ -467,6 +583,9 @@ def _get_cat_character(
     Cached as ``<cat-id>-character<-表情><-装备>.svg``.  The cached artwork
     is the cat's canonical rest pose, which every animation shares up to a
     constant translation (see :func:`_rest_pose_offset`).
+
+    A part file name can only describe the armor, so this sprite never contains
+    a handheld item.
     """
     cacheName = reusable.shape_cache_name(
         cat.id, "character", equip=equipNames, defaults=equipDefaults)
@@ -538,11 +657,11 @@ def _cat_face_cache_key(cat: CustomCat, partDir: str, catTree: swf.SWF_Tree) -> 
         cat.lefteyebrow.frame,
         cat.righteyebrow.frame,
         cat.mouth.frame,
-        getattr(cat, "mouth_sprite", "CatMouth"),
+        cat.mouth_sprite,
     )
 
 
-def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], catTree: swf.SWF_Tree) -> tuple[swf.swf.Matrix, CatFace]:
+def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], catTree: swf.SWF_Tree) -> tuple[swf.swf.Matrix | None, CatFace]:
     key = _cat_face_cache_key(cat, partDir, catTree)
     cached = _HEAD_FACE_CACHE.get(key)
     if cached is not None:
@@ -606,7 +725,7 @@ def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], c
 
         allParts += [face.reye_open, face.reye_closed, face.rbrow]
 
-    base_name = getattr(cat, 'mouth_sprite', 'CatMouth')
+    base_name = cat.mouth_sprite
     closed_name = base_name
     open_name = base_name + "Open"
     smile_name = base_name + "Smile"
@@ -623,12 +742,13 @@ def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], c
     face.mouth_open = get_mouth_component(open_name, "CatMouthOpen")
     face.mouth_smile = get_mouth_component(smile_name, "CatMouthSmile")
 
-    face.mouth_closed.applyTransform(
-        placements.mouth.xform).applyTransform(placements.mouth.cxform)
-    face.mouth_open.applyTransform(
-        placements.mouth.xform).applyTransform(placements.mouth.cxform)
-    face.mouth_smile.applyTransform(
-        placements.mouth.xform).applyTransform(placements.mouth.cxform)
+    if (placements.mouth != None):
+        face.mouth_closed.applyTransform(
+            placements.mouth.xform).applyTransform(placements.mouth.cxform)
+        face.mouth_open.applyTransform(
+            placements.mouth.xform).applyTransform(placements.mouth.cxform)
+        face.mouth_smile.applyTransform(
+            placements.mouth.xform).applyTransform(placements.mouth.cxform)
 
     allParts += [face.mouth_closed, face.mouth_open, face.mouth_smile]
 
@@ -641,12 +761,6 @@ def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], c
     if (placements.neckItem != None and placements.neckItem.xform != None):
         face.neckItemXForm = placements.neckItem.xform
 
-    # No second palette pass here: `_get_cached_cat_component` already recoloured
-    # every face part, and `applyPalette` is not idempotent.  For palettes that map
-    # one grey to another grey (Pebbles' palette 4, MonkCat's palette 66) applying
-    # it twice shifts the colour again, which made only their ears wrong while the
-    # head (recoloured once, in `headWithPose`) stayed correct.
-
     _HEAD_FACE_CACHE[key] = copy.deepcopy(face)
     return (placements.head.xform, copy.deepcopy(face))
 
@@ -654,16 +768,145 @@ def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], c
 ITEM_DICT = None
 
 
-def getCatEquipment(partDir: str, catTree: swf.SWF_Tree, head: str | None, face: str | None, neck: str | None) -> CatEquipment:
+def getItem(name: str) -> items.Item:
+    """Look an item up by its ``.gon`` id, loading the item table on first use."""
     global ITEM_DICT
-
-    out = CatEquipment()
 
     if (ITEM_DICT == None):
         ITEM_DICT = items.getItemDict()
 
+    try:
+        return ITEM_DICT[name]
+    except KeyError:
+        raise KeyError(
+            f"Unknown item '{name}'. Use an id from data/data/items, "
+            f"a <slot> name from {CAT_MINIBOSSES_GON}, or 'none'.") from None
+
+
+class ItemPool:
+    """The standalone weapon/trinket parts an animation draws.
+
+    An item is not part of a cat: it is cached on its own as
+    ``reusable/shapes/<item name>.svg`` and looked up by name, so two cats
+    holding the same weapon share one cached part, and a cat's own parts never
+    change when only its weapon does.
+
+    Which items a cat *may* show comes from three places, in order: an explicit
+    request (``--weapon`` / ``--trinket``), then the cat's character file, then
+    :data:`DEFAULT_TRINKET` for a trinket.  Which of them is actually drawn, and
+    where, is decided by the animation alone: a slot whose animation has no
+    object is not drawn, and every object the animation places for a slot is
+    drawn, however many depths it uses.
+    """
+
+    def __init__(self, items_by_slot: Mapping[str, str] | None = None):
+        #: slot name -> item name, e.g. ``{"weapon": "ButcherHook"}``
+        self._items: dict[str, str] = {
+            slot: str(name) for slot, name in (items_by_slot or {}).items() if name
+        }
+
+    @classmethod
+    def for_cat(cls, catId: str,
+                handheld: Sequence[str | None] | None = None) -> "ItemPool":
+        """The pool of one cat, without looking at any animation yet.
+
+        ``handheld`` is an explicit ``weapon;trinket`` request.  ``None`` means
+        "not requested at all": the cat's character file then decides, including
+        the :data:`DEFAULT_TRINKET` fallback.  A request always overrides the
+        file, and a ``None`` entry inside it leaves that slot empty.
+        """
+        if handheld is None:
+            return cls({slot: name for slot, name in zip(HANDHELD_SLOTS,
+                                                         getDefaultHandheldNames(catId))
+                        if name})
+
+        requested = _as_slots(handheld, HANDHELD_SLOTS)
+        items: dict[str, str] = {}
+        for index, slot in enumerate(HANDHELD_SLOTS):
+            token = requested[index]
+            if token is None or str(token).strip().lower() in NONE_TOKENS:
+                continue
+            items[slot] = str(token).strip()
+
+        return cls(items)
+
+    def confirmed_by(self, anim: Sequence[animations.CatFrame]) -> "ItemPool":
+        """This pool restricted to the slots ``anim`` actually places.
+
+        A weapon or a trinket the animation never draws is not part of the
+        render at all -- the animation decides, not the equipment list.
+        """
+        drawn: set[str] = set()
+        for frame in anim:
+            drawn |= set(getFrameItemTags(frame))
+
+        return self._confirmed_by(drawn)
+
+    def confirmed_by_frames(
+        self,
+        frames_info: Sequence[Sequence["FrameEntry"]],
+    ) -> "ItemPool":
+        """Like :func:`confirmed_by`, for already-extracted frame metadata."""
+        drawn = {str(tag)
+                 for frame in frames_info for _depth, tag, _matrix, _cxform in frame}
+        return self._confirmed_by(drawn)
+
+    def _confirmed_by(self, drawn: set[str]) -> "ItemPool":
+        return ItemPool({slot: name for slot, name in self._items.items()
+                         if slot in drawn})
+
+    def by_slot(self) -> dict[str, "ItemPool"]:
+        """``slot -> single-item pool``, for callers that walk slot by slot."""
+        return {slot: ItemPool({slot: itemName})
+                for slot, itemName in self._items.items()}
+
+    def item_name(self, slot: str) -> str | None:
+        return self._items.get(slot)
+
+    def is_empty(self) -> bool:
+        return not self._items
+
+    def cache_names(self) -> set[str]:
+        """The ``reusable/shapes`` files this pool is drawn from."""
+        return {reusable.item_cache_name(itemName)
+                for itemName in self._items.values()}
+
+    def sprite(self, slot: str) -> sprite.Sprite:
+        """Artwork of the item in ``slot``, through the shared item cache.
+
+        The caller gets its own copy and may transform it freely.
+        """
+        itemName = self._items[slot]
+        key = (slot, itemName)
+        cached = _ITEM_SPRITE_CACHE.get(key)
+        if cached is None:
+            cached = items.getItemSprite(slot, itemName)
+            _ITEM_SPRITE_CACHE[key] = cached
+
+        return cached
+
+    def __repr__(self) -> str:
+        return f"ItemPool({self._items!r})"
+
+    def __eq__(self, other: Any) -> bool:
+        return isinstance(other, ItemPool) and other._items == self._items
+
+    def __hash__(self) -> int:
+        return hash(tuple(sorted(self._items.items())))
+
+
+def getCatEquipment(partDir: str, catTree: swf.SWF_Tree, head: str | None, face: str | None,
+                    neck: str | None) -> CatEquipment:
+    """The worn armor of one cat, as sprites.
+
+    A weapon and a trinket are deliberately not accepted here: they are not part
+    of a cat, and the animation -- not this record -- decides whether they are
+    drawn.
+    """
+    out = CatEquipment()
+
     if (head != None):
-        idata = ITEM_DICT[head]
+        idata = getItem(head)
         frame = idata.frame - 1
 
         fronts = getCatTree(catTree, "HeadItemF").frames[frame].objs
@@ -685,7 +928,7 @@ def getCatEquipment(partDir: str, catTree: swf.SWF_Tree, head: str | None, face:
             partDir, catTree, backKeep)
 
     if (face != None):
-        idata = ITEM_DICT[face]
+        idata = getItem(face)
         frame = idata.frame - 1
 
         fronts = getCatTree(catTree, "FaceItemF").frames[frame].objs
@@ -695,38 +938,80 @@ def getCatEquipment(partDir: str, catTree: swf.SWF_Tree, head: str | None, face:
             partDir, catTree, fronts)
         out.face_back = sprite.spriteFromPlacedObjects(partDir, catTree, backs)
 
-        out.face_front = sprite.spriteFromPlacedObjects(
-            partDir, catTree, fronts)
-        out.face_back = sprite.spriteFromPlacedObjects(partDir, catTree, backs)
-
     if (neck != None):
-        idata = ITEM_DICT[neck]
+        idata = getItem(neck)
         frame = idata.frame - 1
 
-        fronts = getCatTree(catTree, "NeckItemF")
-        backs = getCatTree(catTree, "NeckItemB")
+        neckFronts = getCatTree(catTree, "NeckItemF")
+        neckBacks = getCatTree(catTree, "NeckItemB")
 
         out.neck_front = sprite.spriteFromPlacedObjects(
-            partDir, catTree, fronts.frames[frame].objs)
+            partDir, catTree, neckFronts.frames[frame].objs)
         out.neck_back = sprite.spriteFromPlacedObjects(
-            partDir, catTree, backs.frames[frame].objs)
+            partDir, catTree, neckBacks.frames[frame].objs)
 
     return out
 
 
-def getDefaultEquipNames(catId: str) -> EquipNames:
-    equipment_data: dict = gon.parse_gon(
+def _characterEquipment(catId: str) -> dict[str, Any]:
+    """The ``equipment`` block of a cat's character file, or an empty mapping."""
+    equipment_data = gon.parse_gon(
         CAT_MINIBOSSES_GON) | gon.parse_gon(TERMINATOR_GON)
 
     catId = namefix.get(catId) or catId
+    equipments = equipment_data.get(catId, {}).get("equipment") or {}
+    return equipments if isinstance(equipments, dict) else {}
 
-    head_item = face_item = neck_item = None
-    if catId in equipment_data.keys():
-        equipments = equipment_data.get(catId, {}).get("equipment") or {}
-        head_item = equipments.get("head", None)
-        face_item = equipments.get("face", None)
-        neck_item = equipments.get("neck", None)
-    return (head_item, face_item, neck_item)
+
+def getDefaultEquipNames(catId: str) -> EquipNames:
+    """The worn armor a cat's character file asks for, one entry per slot.
+
+    This is the raw ``equipment`` block: no fallback is applied here, so an
+    explicit selection can still tell "the file says nothing" from "the game
+    would show a chicken".
+    """
+    equipments = _characterEquipment(catId)
+
+    head: str | None = equipments.get("head", None)
+    face: str | None = equipments.get("face", None)
+    neck: str | None = equipments.get("neck", None)
+
+    return (head, face, neck)
+
+
+def getDefaultHandheldNames(catId: str) -> HandheldNames:
+    """The weapon and the trinket a cat's character file asks for.
+
+    Still separate from the equipment, with the trinket fallback the game
+    applies: a cat whose file names no trinket is shown with a chicken.
+    """
+    equipments = _characterEquipment(catId)
+
+    weapon: str | None = equipments.get("weapon", None)
+    trinket: str = equipments.get("trinket", DEFAULT_TRINKET)
+
+    return (weapon, trinket)
+
+
+def getFrameItemTags(frame: animations.CatFrame) -> dict[str, list[animations.Placement]]:
+    """Placements of the animation's handheld objects in one frame.
+
+    The animation SWF names these objects ``weapon`` and ``trinket``; both the
+    transform and the depth they carry are the ones the game draws them with, so
+    they are used as-is.  A frame may place several objects for one slot, at
+    different depths, and every one of them is returned.
+    """
+    used = getattr(frame, "used", {}) or {}
+    out: dict[str, list[animations.Placement]] = {}
+
+    for slot in HANDHELD_SLOTS:
+        values = used.get(slot)
+        if not values:
+            continue
+        out[slot] = sorted((animations.asPlacement(v) for v in values),
+                           key=lambda placement: placement[1])
+
+    return out
 
 
 # Hand-tuned head layer order, listed from the bottom (drawn first) to the top
@@ -737,9 +1022,9 @@ HEAD_LAYER_ORDER_FRONT = (
     "lear",       # Left Ear
     "rear",       # Right Ear
     "head",       # Head
+    "mouth",      # Mouth
     "leye",       # Left Eye
     "lbrow",      # Left Eyebrow
-    "mouth",      # Mouth
     "reye",       # Right Eye
     "rbrow",      # Right Eyebrow
     "headItem",   # Head Item
@@ -750,9 +1035,9 @@ HEAD_LAYER_ORDER_BACK = (
     "faceItem",   # Face Item
     "leye",       # Left Eye
     "lbrow",      # Left Eyebrow
-    "mouth",      # Mouth
     "reye",       # Right Eye
     "rbrow",      # Right Eyebrow
+    "mouth",      # Mouth
     "lear",       # Left Ear
     "rear",       # Right Ear
     "head",       # Head
@@ -768,7 +1053,7 @@ def _head_layer_depths(back: bool) -> dict[str, int]:
 
 
 # palette and base position should be applied before this
-def headWithPose(cat: CustomCat, partDir: str, catTree: swf.SWF_Tree, equipment: CatEquipment, face: CatFace, pose: FacePose, palettes: list[palette.Palette]):
+def headWithPose(cat: CustomCat, partDir: str, catTree: swf.SWF_Tree, equipment: CatEquipment, face: CatFace, pose: FacePose, palettes: list[palette.Palette]) -> sprite.Sprite:
     pose_key = (
         partDir,
         id(catTree),
@@ -790,6 +1075,8 @@ def headWithPose(cat: CustomCat, partDir: str, catTree: swf.SWF_Tree, equipment:
 
     head = copy.deepcopy(catpart.getCatHeadShape(partDir, catTree, getCatTree(catTree,
                                                                               "CatHead"), cat.head.frame, cat.texture, pose.offset))
+    if head.data is None:
+        raise RuntimeError("CatHead sprite has no SVG data")
     palette.applyPalette(palettes[cat.palette], head.data)
 
     face = copy.deepcopy(face)
@@ -878,34 +1165,22 @@ def headWithPose(cat: CustomCat, partDir: str, catTree: swf.SWF_Tree, equipment:
         raise RuntimeError("Weird eye state " + pose.eyes[1])
 
     if (pose.mouth == "closed" and face.mouth_closed != None):
-        tf = sprite.Sprite.matrixFromSVG(
-            face.mouth_closed.data.data.getTransform())
         if (pose.offset[0] < 0):
-            tf.xscale *= -1.0
-            face.mouth_closed.data.data.subcomponents[0].setTransform(
-                sprite.Sprite.matrixToSVG(tf))
+            mirror_sprite_x(face.mouth_closed)
 
         face.mouth_closed.applyTransform(onlyoffset)
         assembly.append(sprite.PlacedSprite(face.mouth_closed,
                         0, depths["mouth"], None, "Mouth"))
     elif (pose.mouth == "open" and face.mouth_open != None):
-        tf = sprite.Sprite.matrixFromSVG(
-            face.mouth_open.data.data.getTransform())
         if (pose.offset[0] < 0):
-            tf.xscale *= -1.0
-            face.mouth_open.data.data.subcomponents[0].setTransform(
-                sprite.Sprite.matrixToSVG(tf))
+            mirror_sprite_x(face.mouth_open)
 
         face.mouth_open.applyTransform(onlyoffset)
         assembly.append(sprite.PlacedSprite(face.mouth_open, 0,
                         depths["mouth"], None, "Mouth"))
     elif (pose.mouth == "smile" and face.mouth_smile != None):
-        tf = sprite.Sprite.matrixFromSVG(
-            face.mouth_smile.data.data.getTransform())
         if (pose.offset[0] < 0):
-            tf.xscale *= -1.0
-            face.mouth_smile.data.data.subcomponents[0].setTransform(
-                sprite.Sprite.matrixToSVG(tf))
+            mirror_sprite_x(face.mouth_smile)
 
         face.mouth_smile.applyTransform(onlyoffset)
         assembly.append(sprite.PlacedSprite(face.mouth_smile, 0,
@@ -916,6 +1191,34 @@ def headWithPose(cat: CustomCat, partDir: str, catTree: swf.SWF_Tree, equipment:
     out = sprite.spriteFromPlacedObjects(partDir, catTree, assembly)
     _HEAD_POSE_CACHE[pose_key] = copy.deepcopy(out)
     return copy.deepcopy(out)
+
+
+def _animation_item_plan_entries(
+    partDir: str,
+    catTree: swf.SWF_Tree,
+    frame: animations.CatFrame,
+    pool: ItemPool,
+) -> list[dict[str, Any]]:
+    """Plan entries for every handheld object the frame places.
+
+    The animation's own ``weapon`` / ``trinket`` objects define where each one is
+    drawn and at which depth, so they are ordinary frame layers: a frame that
+    does not place them shows nothing, and a frame that places several draws all
+    of them.  ``pool`` only says which item artwork a slot refers to.
+    """
+    entries: list[dict[str, Any]] = []
+
+    for slot in HANDHELD_SLOTS:
+        if not pool.item_name(slot):
+            continue
+
+        template = pool.sprite(slot)
+        for placement in getFrameItemTags(frame).get(slot, []):
+            entries.append(_frame_plan_entry(
+                f"{slot.capitalize()} Item", placement[1], placement[0], template,
+                placement[2]))
+
+    return entries
 
 
 def getCustomCats() -> list[CustomCat]:
@@ -946,6 +1249,8 @@ def _measure_sprite_bounds(part: sprite.Sprite, window: float) -> tuple[float, f
     animation canvas with empty space.
     """
     probe = copy.deepcopy(part)
+    if probe.data is None:
+        raise RuntimeError("cannot measure a sprite without SVG data")
     root = probe.data.data
 
     size = window * 2.0
@@ -964,7 +1269,7 @@ def _measure_sprite_bounds(part: sprite.Sprite, window: float) -> tuple[float, f
 
     with PILImage.open(io.BytesIO(png)) as rgba:
         alpha = rgba.convert("RGBA").getchannel("A")
-        bbox = alpha.getbbox()
+        bbox: tuple[float, float, float, float] | None = alpha.getbbox()
         if bbox is None:
             return (0.0, 0.0, 0.0, 0.0)
 
@@ -973,6 +1278,8 @@ def _measure_sprite_bounds(part: sprite.Sprite, window: float) -> tuple[float, f
 
         core = alpha.point(_alpha_core).getbbox()
         if core is not None:
+            # keep the antialiased edge, but clamp it to a halo around the solid
+            # core so a stray faint pixel cannot stretch the frame
             bbox = (
                 max(bbox[0], core[0] - BOUNDS_HALO),
                 max(bbox[1], core[1] - BOUNDS_HALO),
@@ -1029,9 +1336,9 @@ def compute_frames_canvas(
     return (left - margin, top - margin, right + margin, bottom + margin)
 
 
-def set_svg_canvas(frame_sprite: sprite.Sprite, width: float, height: float):
+def set_svg_canvas(frame_sprite: sprite.Sprite, width: float, height: float) -> None:
     """Pin the exported SVG root to the shared animation canvas."""
-    if frame_sprite is None or frame_sprite.data is None or frame_sprite.data.data is None:
+    if frame_sprite.data is None:
         return
 
     root = frame_sprite.data.data
@@ -1044,7 +1351,7 @@ def set_svg_canvas(frame_sprite: sprite.Sprite, width: float, height: float):
     root.setField("viewBox", f"0 0 {width} {height}")
 
 
-def _render_gif_frame(svg_data: str, background: Any, resolution: float):
+def _render_gif_frame(svg_data: str, background: Any, resolution: float) -> PILImage.Image:
     """Rasterise one frame's SVG into a single RGBA Pillow frame.
 
     ImageMagick is used only to turn the SVG into pixels; the PNG blob is a
@@ -1064,7 +1371,8 @@ def _render_gif_frame(svg_data: str, background: Any, resolution: float):
         return rendered.convert("RGBA")
 
 
-def save_cat_output(outfolder, cat_id, anim_name, frames: list[sprite.Sprite], scaling=3.0, generate_gif: bool = True):
+def save_cat_output(outfolder: str, cat_id: str, anim_name: str, frames: list[sprite.Sprite],
+                    scaling: float = 3.0, generate_gif: bool = True) -> None:
     """将 frames 列表中的 Sprite 保存为 SVG 序列、第一帧 PNG 和 GIF 动画
 
     The canvas is sized to the whole animation instead of a fixed square, so the
@@ -1100,7 +1408,7 @@ def save_cat_output(outfolder, cat_id, anim_name, frames: list[sprite.Sprite], s
     logging.info("Animation canvas for '%s-%s': %.0fx%.0f at (%.1f, %.1f)",
                  cat_id, anim_name, width, height, left, top)
 
-    def exported_frames():
+    def exported_frames() -> Iterator[tuple[int, str]]:
         """Write every SVG, yielding each frame's markup as it is produced."""
         for i, frame_sprite in enumerate(frames):
             outfile = os.path.join(assets_path, f"{i}.svg")
@@ -1126,13 +1434,14 @@ def save_cat_output(outfolder, cat_id, anim_name, frames: list[sprite.Sprite], s
         source = exported_frames()
         first = next(source, None)
         if first is None:
-            logging.warning("No frames to export for '%s-%s'", cat_id, anim_name)
+            logging.warning("No frames to export for '%s-%s'",
+                            cat_id, anim_name)
             return
 
         index, svgData = first
         resolution = MEASURE_DPI * scaling
 
-        def gif_frames():
+        def gif_frames() -> Iterator[PILImage.Image]:
             # The first frame doubles as the still preview PNG, as before.
             first_frame = _render_gif_frame(svgData, bg, resolution)
             first_frame.save(os.path.join(assets_path, f"{index}.png"))
@@ -1146,7 +1455,7 @@ def save_cat_output(outfolder, cat_id, anim_name, frames: list[sprite.Sprite], s
         _write_gif(gif_frames(), outfile)
 
 
-def _write_gif(frames, outfile: str):
+def _write_gif(frames: Iterable[PILImage.Image], outfile: str) -> None:
     """Write ``frames`` (an iterator of RGBA images) to ``outfile`` as a GIF.
 
     Pillow consumes the iterator lazily, keeps at most two frames alive while it
@@ -1171,66 +1480,139 @@ def _write_gif(frames, outfile: str):
     os.replace(tmpfile, outfile)
 
 
+#: One layer of a frame: its depth, tag, transform (``None`` for a skipped tag)
+#: and the serialised SWF color transform it carries, if any.
+FrameEntry = tuple[int, str, "FloatMatrix | None", "dict | None"]
 
-def frame_used_value(frame: animations.CatFrame, key: str):
+
+def is_default_placement(value: Any) -> bool:
+    """True for a `CatFrame` placeholder value rather than a real placement.
+
+    `CatFrame` initialises every part to an identity matrix at depth 0, and depth
+    0 is not a valid SWF display-list depth, so such a value always means "this
+    frame does not place the part".  Treating it as a placement resurrects parts
+    that a `RemoveObject2` had hidden.
+    """
+    if not (isinstance(value, tuple) and len(value) in (2, 3)):
+        return True
+
+    matrix, depth = value[0], value[1]
+    if matrix is None:
+        return True
+
+    return (depth == 0
+            and getattr(matrix, "xscale", 1.0) == 1.0
+            and getattr(matrix, "yscale", 1.0) == 1.0
+            and getattr(matrix, "skew1", 0.0) == 0.0
+            and getattr(matrix, "skew2", 0.0) == 0.0
+            and getattr(matrix, "xoffset", 0.0) == 0.0
+            and getattr(matrix, "yoffset", 0.0) == 0.0)
+
+
+def frame_used_placements(frame: animations.CatFrame, key: str) -> list[animations.Placement]:
+    """Every placement of ``key`` (and of its variant families) in one frame."""
     used = getattr(frame, "used", {}) or {}
-    results: list[tuple[swf.swf.Matrix, int]] = []
+    results: list[animations.Placement] = []
 
     # collect exact key entries
     if key in used:
-        results += list(used[key])
+        results += [animations.asPlacement(v) for v in used[key]]
 
-    # collect variant keys like 'head_back', 'head_default', etc.
-    prefix = key + "_"
+    # collect variant keys like 'head_back', 'head_default', 'headblend_*', etc.
+    prefixes = tag_family_prefixes(key)
     for k, vals in used.items():
-        if k.startswith(prefix):
-            results += list(vals)
+        if k.startswith(prefixes):
+            results += [animations.asPlacement(v) for v in vals]
 
     # fallback to single attribute on the CatFrame (legacy)
     if not results:
         value = getattr(frame, key, None)
-        if isinstance(value, tuple) and len(value) == 2:
-            results = [value]
+        if not is_default_placement(value):
+            results = [animations.asPlacement(value)]
 
     # return entries sorted by depth (ascending)
     return sorted(results, key=lambda item: item[1])
 
 
-def frame_used_tag_entries(frame: animations.CatFrame, key: str):
+def frame_used_value(frame: animations.CatFrame, key: str) -> list[tuple[swf.swf.Matrix, int]]:
+    """Like :func:`frame_used_placements`, dropping the color transform."""
+    return [(placement[0], placement[1]) for placement in frame_used_placements(frame, key)]
+
+
+def frame_used_tag_placements(frame: animations.CatFrame, key: str) -> list[tuple[str, animations.Placement]]:
+    """Like :func:`frame_used_placements`, keeping the tag each placement came from."""
     used = getattr(frame, "used", {}) or {}
-    results: list[tuple[str, swf.swf.Matrix, int]] = []
+    results: list[tuple[str, animations.Placement]] = []
     seen: set[tuple[str, int]] = set()
 
     if key in used:
-        for matrix, depth in used[key]:
-            marker = (key, depth)
+        for placement in used[key]:
+            placement = animations.asPlacement(placement)
+            marker = (key, placement[1])
             if marker not in seen:
                 seen.add(marker)
-                results.append((key, matrix, depth))
+                results.append((key, placement))
 
-    prefix = key + "_"
+    prefixes = tag_family_prefixes(key)
     for tag_name, values in used.items():
-        if tag_name.startswith(prefix):
-            for matrix, depth in values:
-                marker = (tag_name, depth)
+        if tag_name.startswith(prefixes):
+            for placement in values:
+                placement = animations.asPlacement(placement)
+                marker = (tag_name, placement[1])
                 if marker not in seen:
                     seen.add(marker)
-                    results.append((tag_name, matrix, depth))
+                    results.append((tag_name, placement))
 
     if not results:
         value = getattr(frame, key, None)
-        if isinstance(value, tuple) and len(value) == 2:
-            matrix, depth = value
-            results.append((key, matrix, depth))
+        if not is_default_placement(value):
+            results.append((key, animations.asPlacement(value)))
 
-    return sorted(results, key=lambda item: item[2])
+    return sorted(results, key=lambda item: item[1][1])
 
 
-def _frame_plan_entry(name: str, depth: int, matrix: swf.swf.Matrix | None, sprite_template: sprite.Sprite) -> dict[str, Any]:
+def frame_used_tag_entries(frame: animations.CatFrame, key: str) -> list[tuple[str, swf.swf.Matrix, int]]:
+    """Like :func:`frame_used_tag_placements`, dropping the color transform."""
+    return [(tag, placement[0], placement[1])
+            for tag, placement in frame_used_tag_placements(frame, key)]
+
+
+def frame_head_layers(frame: animations.CatFrame) -> list[tuple[str, animations.Placement]]:
+    """The head layers a frame actually shows, as ``(tag, placement)`` pairs.
+
+    A ``headblend_<pose>`` tag is not a cross-fade.  The SWF drives the fade with
+    the blend's alpha, but this pipeline renders single frames, where a
+    half-faded face is simply a wrong face -- so the blend's color transform is
+    dropped and the pose it names is drawn as the head, at the head layer's own
+    placement.
+
+    A *specific* ``head_<pose>`` tag outranks the blend: while the SWF is
+    cross-fading it keeps the generic ``head`` tag as the source, so the blend is
+    the pose to show, and the moment the artist moves the head tag to
+    ``head_<pose>`` that pose is the destination and wins outright.
+
+    A blend with no head layer to replace draws nothing.
+    """
+    placements = frame_used_tag_placements(frame, "head")
+    heads = [(tag, placement) for tag, placement in placements
+             if not animations.isHeadBlendTag(tag)]
+    blends = [tag for tag, _placement in placements if animations.isHeadBlendTag(tag)]
+
+    if not heads or not blends:
+        return heads
+
+    if any(animations.headTagExpression(tag) for tag, _placement in heads):
+        return heads
+
+    return [(blends[-1], heads[-1][1])]
+
+
+def _frame_plan_entry(name: str, depth: float, matrix: swf.swf.Matrix | None, sprite_template: sprite.Sprite, cxform: swf.swf.CXFORM | None = None) -> dict[str, Any]:
     return {
         "name": name,
         "depth": depth,
         "matrix": matrix,
+        "cxform": cxform,
         "sprite_template": sprite_template,
     }
 
@@ -1242,32 +1624,40 @@ def _build_frame_plan(
     catTree: swf.SWF_Tree,
     equip: CatEquipment,
     frame: animations.CatFrame,
-    extras: dict[str, tuple[swf.swf.Matrix, int]] | None = None,
+    extras: dict[str, animations.Placement] | None = None,
     *,
     depth_sort: bool = True,
     equipNames: EquipNames | None = None,
     equipDefaults: EquipNames | None = None,
+    pool: ItemPool | None = None,
 ) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
 
-    for tag_name, matrix, depth in frame_used_tag_entries(frame, "head"):
+    for tag_name, placement in frame_head_layers(frame):
         plan.append(_frame_plan_entry(
             f"Whole Head:{tag_name}",
-            depth,
-            matrix,
+            placement[1],
+            placement[0],
             _get_cat_head(cat, _head_expression(frame, tag_name), equip, equipNames,
                           equipDefaults, partDir, palettes, catTree),
+            placement[2],
         ))
 
     for part_key, label in (("body", "Body"), ("arm1", "Right Arm"), ("arm2", "Left Arm"),
                             ("leg1", "Right Leg"), ("leg2", "Left Leg"), ("tail", "Tail")):
-        for matrix, depth in frame_used_value(frame, part_key):
+        for placement in frame_used_placements(frame, part_key):
             plan.append(_frame_plan_entry(
-                label, depth, matrix,
-                _get_cat_part(cat, part_key, partDir, palettes, catTree)))
+                label, placement[1], placement[0],
+                _get_cat_part(cat, part_key, partDir, palettes, catTree),
+                placement[2]))
+
+    # The weapon and the trinket are placed by the animation, at its own depth.
+    if pool is not None:
+        plan += _animation_item_plan_entries(partDir, catTree, frame, pool)
 
     if extras:
-        for name, (matrix, depth) in extras.items():
+        for name, placement in extras.items():
+            matrix, depth, cxform = animations.asPlacement(placement)
             bareName = name.removeprefix("other_")
             if bareName == "head":
                 sprite_template = _get_cat_head(
@@ -1279,7 +1669,7 @@ def _build_frame_plan(
             else:
                 continue
             plan.append(_frame_plan_entry(
-                f"Extra {name}", depth, matrix, sprite_template))
+                f"Extra {name}", depth, matrix, sprite_template, cxform))
 
     if depth_sort:
         plan.sort(key=lambda item: item["depth"])
@@ -1290,6 +1680,8 @@ def _instantiate_frame_plan(plan: list[dict[str, Any]]) -> list[sprite.PlacedSpr
     assembly: list[sprite.PlacedSprite] = []
     for entry in plan:
         part = copy.deepcopy(entry["sprite_template"])
+        # the SWF color transform tints the part and carries its alpha
+        part.applyTransform(entry.get("cxform"))
         if entry["matrix"] is not None:
             part.applyTransform(entry["matrix"])
         assembly.append(sprite.PlacedSprite(
@@ -1304,7 +1696,7 @@ def _assemble_frame_part_sprites(
     catTree: swf.SWF_Tree,
     equip: CatEquipment,
     frame: animations.CatFrame,
-    extras: dict[str, tuple[swf.swf.Matrix, int]] | None = None,
+    extras: dict[str, animations.Placement] | None = None,
     *,
     depth_sort: bool = True,
     equipNames: EquipNames | None = None,
@@ -1347,47 +1739,41 @@ def _matrix_to_float_matrix(matrix: swf.swf.Matrix) -> FloatMatrix:
     )
 
 
-def extract_anim_tag_pool_and_frames_info(anim: list[animations.CatFrame]) -> tuple[list[str], list[list[tuple[int, str, FloatMatrix | None]]]]:
+def extract_anim_tag_pool_and_frames_info(anim: list[animations.CatFrame]) -> tuple[list[str], list[list["FrameEntry"]]]:
     """Collect the per-frame tag metadata once, without depending on whether a second cat is being rendered.
 
-    Entries are ``(depth, tag, transform)``; ``transform`` is ``None`` for the
-    "UNSUPPORTED:<tag>" records produced for skipped tags.
+    Entries are ``(depth, tag, transform, colorTransform)``; ``transform`` is
+    ``None`` for the "UNSUPPORTED:<tag>" records produced for skipped tags, and
+    ``colorTransform`` is the serialised SWF color transform when the tag has one.
     """
     tag_pool: list[str] = []
-    frames_info: list[list[tuple[int, str, FloatMatrix | None]]] = []
+    frames_info: list[list[FrameEntry]] = []
 
     for frame in anim:
         used = getattr(frame, "used", {}) or {}
-        frame_entries: list[tuple[int, str, FloatMatrix | None]] = []
+        frame_entries: list[FrameEntry] = []
 
         for tag_name, values in used.items():
             if tag_name not in tag_pool:
                 tag_pool.append(tag_name)
-            for matrix, depth in values:
-                frame_entries.append(
-                    (int(depth), tag_name, _matrix_to_float_matrix(matrix)))
+            for value in values:
+                matrix, depth, cxform = animations.asPlacement(value)
+                frame_entries.append((
+                    int(depth), tag_name, _matrix_to_float_matrix(matrix),
+                    animations.colorTransformToCache(cxform)))
 
         for key in ("head", "body", "arm1", "arm2", "leg1", "leg2", "tail"):
-            if key in used or any(k.startswith(f"{key}_") for k in used):
+            if key in used or any(k.startswith(tag_family_prefixes(key)) for k in used):
                 continue
             value = getattr(frame, key, None)
-            if isinstance(value, tuple) and len(value) == 2:
-                matrix, depth = value
-                if matrix is None:
-                    continue
-                if depth == 0 and (
-                    getattr(matrix, "xscale", 1.0) == 1.0 and
-                    getattr(matrix, "yscale", 1.0) == 1.0 and
-                    getattr(matrix, "skew1", 0.0) == 0.0 and
-                    getattr(matrix, "skew2", 0.0) == 0.0 and
-                    getattr(matrix, "xoffset", 0.0) == 0.0 and
-                    getattr(matrix, "yoffset", 0.0) == 0.0
-                ):
-                    continue
-                if key not in tag_pool:
-                    tag_pool.append(key)
-                frame_entries.append(
-                    (int(depth), key, _matrix_to_float_matrix(matrix)))
+            if is_default_placement(value):
+                continue
+            matrix, depth, cxform = animations.asPlacement(value)
+            if key not in tag_pool:
+                tag_pool.append(key)
+            frame_entries.append((
+                int(depth), key, _matrix_to_float_matrix(matrix),
+                animations.colorTransformToCache(cxform)))
 
         # keep a trace of every object we had to skip.
         for skipped in getattr(frame, "skipped", []) or []:
@@ -1395,6 +1781,7 @@ def extract_anim_tag_pool_and_frames_info(anim: list[animations.CatFrame]) -> tu
             frame_entries.append((
                 int(depth) if depth is not None else 0,
                 str(skipped.get("tag", "UNSUPPORTED:?")),
+                None,
                 None,
             ))
 
@@ -1407,20 +1794,27 @@ def extract_anim_tag_pool_and_frames_info(anim: list[animations.CatFrame]) -> tu
 def _write_anim_metadata(
     anim_name: str,
     tag_pool: list[str],
-    frames_info: list[list[tuple[int, str, FloatMatrix | None]]],
+    frames_info: list[list["FrameEntry"]],
     complete: bool = True,
     overlay_mode: str | None = None,
+    items: ItemPool | None = None,
 ) -> dict[str, Any]:
     """Cache one animation's metadata under reusable/anims/<anim-name>.json.
 
     ``complete`` says whether the file describes the whole animation, including
     the second character.  Only complete files may be used to render without
     reading the source SWF, and an incomplete write never replaces a complete one.
+
+    ``items`` records which standalone weapon/trinket parts the animation places.
+    Those are confirmed *by* the metadata: a slot that never appears in
+    ``tag_pool`` is written without an entry, so a cached render draws exactly
+    what the animation draws.
     """
     payload: dict[str, Any] = {
         "anim_name": anim_name,
         "overlay_mode": overlay_mode,
         "complete": bool(complete),
+        "metadata_version": reusable.ANIM_CACHE_VERSION,
     }
 
     if not complete:
@@ -1436,18 +1830,25 @@ def _write_anim_metadata(
     frames_obj = {}
     for i, frame in enumerate(frames_info):
         entries = []
-        for depth, tag_name, matrix in frame:
+        for depth, tag_name, matrix, cxform in frame:
             entry: dict[str, Any] = {"depth": int(depth), "tag": tag_name}
             if matrix is None:
                 entry["transform"] = None
                 entry["note"] = "skipped"
             else:
                 entry["transform"] = [float(v) for v in matrix]
+            if cxform is not None:
+                entry["colorTransform"] = cxform
             entries.append(entry)
         frames_obj[str(i)] = entries
 
     payload["tag_pool"] = list(tag_pool)
     payload["frames"] = frames_obj
+    if items is not None:
+        drawn = items.confirmed_by_frames(frames_info)
+        if not drawn.is_empty():
+            payload["items"] = {slot: drawn.item_name(slot)
+                                for slot in sorted(drawn.by_slot())}
 
     path = reusable.save_anim_cache(anim_name, payload)
     if path is not None:
@@ -1462,26 +1863,26 @@ _write_report_anim_metadata = _write_anim_metadata
 class SecondCatResolver:
     """Resolves the second cat, asking the user only the very first time.
 
-    Batch mode needs the same answer for every cat, and will ask at the 
+    Batch mode needs the same answer for every cat, and will ask at the
     moment the animation places the second cat. Only *names* are resolved
-    here, so this works without any SWF data; the caller builds the 
+    here, so this works without any SWF data; the caller builds the
     equipment sprites when it actually has a tree.
     """
 
     def __init__(
         self,
         catList: list[CustomCat],
-        cat2Id: str | None,
-        equip2Mode: str,
-        equip2: EquipNames | None,
+        catId: str | None,
+        equipMode: str,
+        equip: Sequence[str | None] | None,
     ):
         self.catList = catList
-        self.cat2Id = cat2Id
-        self.equip2Mode = equip2Mode
-        self.equip2 = equip2
+        self.id = catId
+        self.equipMode = equipMode
+        self.equip = equip
 
-        self._resolved: tuple[CustomCat, tuple |
-                              None, bool, tuple] | None = None
+        self._resolved: tuple[CustomCat, EquipNames,
+                              bool, EquipNames] | None = None
         self._attempted = False
 
     def resolve(self) -> tuple[CustomCat, EquipNames, bool, EquipNames] | None:
@@ -1490,17 +1891,16 @@ class SecondCatResolver:
 
         self._attempted = True
 
-        cat2 = prompt_first_cat(self.catList, self.cat2Id,
-                                allowPrompt=not self.cat2Id)
+        cat2 = prompt_first_cat(self.catList, self.id,
+                                allowPrompt=not self.id)
         if cat2 is None:
             logger.warning(
-                "No cat matched '%s'; the second character will be skipped.", self.cat2Id)
+                "No cat matched '%s'; the second character will be skipped.", self.id)
             return None
 
         names, explicit = resolve_equipment_names(
-            cat2, self.equip2Mode, self.equip2)
-        self._resolved = (cat2, names, explicit,
-                          tuple(getDefaultEquipNames(cat2.id)))
+            cat2, self.equipMode, self.equip)
+        self._resolved = (cat2, names, explicit, getDefaultEquipNames(cat2.id))
         return self._resolved
 
 
@@ -1516,19 +1916,26 @@ def render_animation(
     equipNames: EquipNames | None,
     equipDefaults: EquipNames | None,
     secondCat: SecondCatResolver | None = None,
+    pool: ItemPool | None = None,
 ) -> list[sprite.Sprite]:
-    """Render one animation, adding the second character the SWF asks for."""
+    """Render one animation, adding the second character the SWF asks for.
+
+    ``pool`` holds the weapon/trinket parts this render may draw; the animation
+    decides which of them, and where, actually appear.
+    """
+    items = pool or ItemPool()
+
     overlay_mode, payload = _second_cat_overlay_plan(cat_anim)
     logger.info("Resolved overlay mode for animation '%s': %s",
                 anim_name, overlay_mode)
 
     frames, tag_pool, frames_info = _assemble_frames_for_first_cat(
         cat, partDir, palettes, cat_anim, catpartTree, catEquip,
-        equipNames=equipNames, equipDefaults=equipDefaults)
+        equipNames=equipNames, equipDefaults=equipDefaults, pool=items)
 
     if overlay_mode is None:
         _write_anim_metadata(anim_name, tag_pool, frames_info,
-                             complete=True, overlay_mode=None)
+                             complete=True, overlay_mode=None, items=items)
         return frames
 
     resolved = secondCat.resolve() if secondCat is not None else None
@@ -1538,7 +1945,7 @@ def render_animation(
         # The cached file would not describe the whole animation, so it is marked
         # incomplete and the next run re-reads the SWF.
         _write_anim_metadata(anim_name, tag_pool, frames_info,
-                             complete=False, overlay_mode=overlay_mode)
+                             complete=False, overlay_mode=overlay_mode, items=items)
         return frames
 
     cat2, equip2Names, equip2Explicit, equip2Defaults = resolved
@@ -1552,9 +1959,9 @@ def render_animation(
         frames, tag_pool, frames_info = _assemble_frames_for_first_cat(
             cat, partDir, palettes, cat_anim, catpartTree, catEquip,
             extras_by_frame, cat2, catEquip2, equipNames, equipDefaults,
-            equip2CacheNames, equip2Defaults)
+            equip2CacheNames, equip2Defaults, pool=items)
         _write_anim_metadata(anim_name, tag_pool, frames_info,
-                             complete=True, overlay_mode=overlay_mode)
+                             complete=True, overlay_mode=overlay_mode, items=items)
         logger.info(
             "Added second cat '%s' as frame-timed part overlay", cat2.id)
         return frames
@@ -1566,7 +1973,7 @@ def render_animation(
         logger.warning(
             "Animation '%s' needs the idle rest pose, which is unavailable.", anim_name)
         _write_anim_metadata(anim_name, tag_pool, frames_info,
-                             complete=False, overlay_mode=overlay_mode)
+                             complete=False, overlay_mode=overlay_mode, items=items)
         return frames
 
     # Cache the rest pose too, so a later run can rebuild this layer offline.
@@ -1577,24 +1984,29 @@ def render_animation(
 
     restFrame = idle_frame[0]
     characterSprite = _get_cat_character(
-        cat2, catEquip2, equip2Names, equip2Defaults, partDir, palettes, catpartTree, restFrame)
+        cat2, catEquip2, equip2Names, equip2Defaults, partDir, palettes,
+        catpartTree, restFrame)
     characterOffset = _rest_pose_offset(restFrame, cat_anim[0])
 
-    characterByFrame: list[tuple[swf.swf.Matrix, int] | None] = []
+    characterByFrame: list[animations.Placement | None] = []
     for aframe in cat_anim:
         entry = (getattr(aframe, "extra", {}) or {}).get("character")
         if entry is None:
             characterByFrame.append(None)
             continue
         matrix, depth = _extra_matrix_and_depth(entry)
-        characterByFrame.append(None if matrix is None else (matrix, depth))
+        if matrix is None:
+            characterByFrame.append(None)
+            continue
+        cxform = entry[2] if isinstance(entry, (list, tuple)) and len(entry) > 2 else None
+        characterByFrame.append((matrix, 0 if depth is None else depth, cxform))
 
     frames, tag_pool, frames_info = _assemble_frames_for_first_cat(
         cat, partDir, palettes, cat_anim, catpartTree, catEquip,
         None, None, None, equipNames, equipDefaults, None, None,
-        characterByFrame, characterSprite, characterOffset)
+        characterByFrame, characterSprite, characterOffset, pool=items)
     _write_anim_metadata(anim_name, tag_pool, frames_info,
-                         complete=True, overlay_mode=overlay_mode)
+                         complete=True, overlay_mode=overlay_mode, items=items)
     logger.info("Added second cat '%s' as a whole-body character layer", cat2.id)
     return frames
 
@@ -1613,7 +2025,13 @@ def _second_character_transform(anim: list[animations.CatFrame], frame_index: in
     return None
 
 
+#: one entry of :attr:`animations.CatFrame.extra` holds a flat 6-value matrix,
+#: either written straight as floats or inside a ``matrix`` block
+FlatMatrixValue = tuple[float, float, float, float, float, float]
+
+
 def _as_matrix(value: Any) -> swf.swf.Matrix | None:
+    """Read a matrix out of its flat ``[a, b, c, d, tx, ty]`` form."""
     if isinstance(value, swf.swf.Matrix):
         return value
 
@@ -1625,26 +2043,45 @@ def _as_matrix(value: Any) -> swf.swf.Matrix | None:
     return None
 
 
-def _extra_matrix_and_depth(value: Any) -> tuple[swf.swf.Matrix | None, int]:
-    if isinstance(value, tuple) and len(value) == 2:
-        matrix_value, depth_value = value
-        return _as_matrix(matrix_value), int(depth_value)
+def _extra_matrix_and_depth(value: Any) -> tuple[swf.swf.Matrix | None, int | None]:
+    """Split an ``extra`` entry into its matrix and its depth.
 
-    return _as_matrix(value), 0
+    ``CatFrame.extra`` maps a tag to ``(matrix, depth[, colorTransform])``; the
+    matrix itself is either a plain 6-value list or a ``matrix`` block that the GON
+    parser turned into a dict.  The depth is ``None`` when the entry does not
+    carry one.
+    """
+    if isinstance(value, (list, tuple)) and len(value) in (2, 3):
+        matrix_value, depth_value = value[0], value[1]
+        depth = int(depth_value) if isinstance(depth_value, int) else None
+        return _as_matrix(matrix_value), depth
+
+    return _as_matrix(value), None
 
 
-def _second_character_parts(anim: list[animations.CatFrame]) -> list[dict[str, tuple[swf.swf.Matrix, int]]]:
-    out: list[dict[str, tuple[swf.swf.Matrix, int]]] = [{} for _ in anim]
+def _extra_depth(value: Any) -> int:
+    """The depth of an ``extra`` entry, defaulting to ``0``."""
+    _matrix, depth = _extra_matrix_and_depth(value)
+    return 0 if depth is None else depth
+
+
+def _second_character_parts(anim: list[animations.CatFrame]) -> list[dict[str, animations.Placement]]:
+    """The second cat's parts per frame, as ``tag -> placement``."""
+    out: list[dict[str, animations.Placement]] = [{} for _ in anim]
     for i, frame in enumerate(anim):
         extra = getattr(frame, "extra", {}) or {}
         for key, value in extra.items():
             if not key.startswith("other_"):
                 continue
-            part_key = key.removeprefix("other_")
-            if part_key in {"head", "body", "tail", "arm1", "arm2", "leg1", "leg2"}:
-                matrix, depth = _extra_matrix_and_depth(value)
-                if matrix is not None:
-                    out[i][key] = (matrix, depth)
+            if key.removeprefix("other_") not in SECOND_CAT_PART_KEYS:
+                continue
+
+            matrix, depth = _extra_matrix_and_depth(value)
+            if matrix is None:
+                continue
+
+            cxform = value[2] if isinstance(value, (list, tuple)) and len(value) > 2 else None
+            out[i][key] = (matrix, 0 if depth is None else depth, cxform)
     return out
 
 
@@ -1657,7 +2094,7 @@ def _float_matrix_to_matrix(matrix: FloatMatrix) -> swf.swf.Matrix:
     return out
 
 
-def _second_cat_overlay_plan(anim: list[animations.CatFrame]) -> tuple[str | None, swf.swf.Matrix | list[dict[str, tuple[swf.swf.Matrix, int]]] | None]:
+def _second_cat_overlay_plan(anim: list[animations.CatFrame]) -> tuple[str | None, swf.swf.Matrix | list[dict[str, animations.Placement]] | None]:
     """Decide the second-cat overlay mode from animation metadata before rendering.
 
     This keeps mode detection based on tag extraction and per-frame metadata instead of
@@ -1680,7 +2117,7 @@ def _second_cat_overlay_plan(anim: list[animations.CatFrame]) -> tuple[str | Non
 
     if "character" in tag_pool:
         for frame in frames_info:
-            for depth, tag_name, matrix in frame:
+            for depth, tag_name, matrix, _cxform in frame:
                 if tag_name != "character" or matrix is None:
                     continue
                 logger.info(
@@ -1707,13 +2144,13 @@ def _idle_first_frame(anims: dict[str, list[animations.CatFrame]]) -> list[anima
 
 def _append_second_cat_extras(
     assembly: list[sprite.PlacedSprite],
-    frame_entries: list[tuple[int, str, FloatMatrix | None]],
+    frame_entries: list[FrameEntry],
     cat2: CustomCat,
     partDir: str,
     palettes: list[palette.Palette],
     catTree: swf.SWF_Tree,
     equip2: CatEquipment,
-    extras: dict[str, tuple[swf.swf.Matrix, int]],
+    extras: dict[str, animations.Placement],
     tag_pool: list[str],
     equip2Names: EquipNames | None = None,
     equip2Defaults: EquipNames | None = None,
@@ -1726,7 +2163,8 @@ def _append_second_cat_extras(
         if name not in tag_pool:
             tag_pool.append(name)
 
-    for raw_name, (matrix, depth) in extras.items():
+    for raw_name, placement in extras.items():
+        matrix, depth, cxform = animations.asPlacement(placement)
         tag_name = raw_name
         part_name = raw_name.removeprefix(
             "other_") if raw_name.startswith("other_") else raw_name
@@ -1741,12 +2179,43 @@ def _append_second_cat_extras(
             continue
 
         part_sprite = copy.deepcopy(part_sprite)
+        part_sprite.applyTransform(cxform)
         part_sprite.applyTransform(matrix)
         assembly.append(sprite.PlacedSprite(
             part_sprite, 0, depth, None, tag_name))
         add_pool(tag_name)
-        frame_entries.append((depth, tag_name, (matrix.xscale, matrix.skew1,
-                             matrix.skew2, matrix.yscale, matrix.xoffset, matrix.yoffset)))
+        frame_entries.append(
+            (depth, tag_name, _matrix_to_float_matrix(matrix),
+             animations.colorTransformToCache(cxform)))
+
+
+def _append_animation_items(
+    assembly: list[sprite.PlacedSprite],
+    frame_entries: list[FrameEntry],
+    tag_pool: list[str],
+    frame: animations.CatFrame,
+    pool: ItemPool,
+) -> None:
+    """Append every handheld layer the frame places, at its own depth."""
+    for slot in HANDHELD_SLOTS:
+        if not pool.item_name(slot):
+            continue
+
+        template = pool.sprite(slot)
+        for placement in getFrameItemTags(frame).get(slot, []):
+            matrix, depth, cxform = animations.asPlacement(placement)
+            part = copy.deepcopy(template)
+            part.applyTransform(cxform)
+            part.applyTransform(matrix)
+
+            assembly.append(sprite.PlacedSprite(
+                part, 0, int(depth), None, f"{slot.capitalize()} Item"))
+
+            if slot not in tag_pool:
+                tag_pool.append(slot)
+            frame_entries.append(
+                (int(depth), slot, _matrix_to_float_matrix(matrix),
+                 animations.colorTransformToCache(cxform)))
 
 
 PART_LABELS = {
@@ -1766,51 +2235,72 @@ def _assemble_frames_for_first_cat(
     anim: list[animations.CatFrame],
     catTree: swf.SWF_Tree,
     equip: CatEquipment,
-    extras_by_frame: list[dict[str, tuple[swf.swf.Matrix, int]]] | None = None,
+    extras_by_frame: list[dict[str, animations.Placement]] | None = None,
     second_cat: CustomCat | None = None,
     second_equip: CatEquipment | None = None,
     equipNames: EquipNames | None = None,
     equipDefaults: EquipNames | None = None,
     secondEquipNames: EquipNames | None = None,
-    secondEquipDefaults: tuple[str | None,
-                               str | None, str | None] | None = None,
-    characterByFrame: list[tuple[swf.swf.Matrix, int] | None] | None = None,
+    secondEquipDefaults: EquipNames | None = None,
+    characterByFrame: list[animations.Placement | None] | None = None,
     characterSprite: sprite.Sprite | None = None,
     characterOffset: tuple[float, float] = (0.0, 0.0),
-):
+    pool: ItemPool | None = None,
+) -> tuple[list[sprite.Sprite], list[str], list[list[FrameEntry]]]:
     out = []
     tag_pool = []
-    frames_info: list[list[tuple[int, str, FloatMatrix | None]]] = []
+    frames_info: list[list[FrameEntry]] = []
 
     for i, frame in enumerate(anim):
         assembly = []
-        frame_entries: list[tuple[int, str, FloatMatrix | None]] = []
+        frame_entries: list[FrameEntry] = []
 
         def add_pool(name: str):
             if name not in tag_pool:
                 tag_pool.append(name)
 
+        def add_entry(depth: int, tag: str, matrix: swf.swf.Matrix | None,
+                      cxform: swf.swf.CXFORM | None) -> None:
+            frame_entries.append((
+                depth,
+                tag,
+                None if matrix is None else (matrix.xscale, matrix.skew1,
+                                             matrix.skew2, matrix.yscale,
+                                             matrix.xoffset, matrix.yoffset),
+                animations.colorTransformToCache(cxform),
+            ))
+
         # same depth as the previous frame -> only the transform
         # changes, so the part artwork is reused from reusable/shapes.
-        for tag_name, matrix, depth in frame_used_tag_entries(frame, "head"):
+        #
+        # Every head-family placement is logged as the SWF has it, so the cached
+        # metadata stays a faithful record and the decision of which layer is
+        # actually shown can be re-derived from the tag names alone.
+        for tag_name, placement in frame_used_tag_placements(frame, "head"):
+            add_pool(tag_name)
+            add_entry(placement[1], tag_name, placement[0], placement[2])
+
+        # A `headblend_<pose>` replaces the other head layers with its own pose.
+        for tag_name, placement in frame_head_layers(frame):
+            matrix, depth, cxform = placement
             head = _get_cat_head(cat, _head_expression(frame, tag_name), equip,
                                  equipNames, equipDefaults, partDir, palettes, catTree)
+            head = copy.deepcopy(head)
+            head.applyTransform(cxform)
             head.applyTransform(matrix)
             assembly.append(sprite.PlacedSprite(
                 head, 0, depth, None, f"Whole Head:{tag_name}"))
-            add_pool(tag_name)
-            frame_entries.append((depth, tag_name, (matrix.xscale, matrix.skew1,
-                                 matrix.skew2, matrix.yscale, matrix.xoffset, matrix.yoffset)))
 
         for part_key in ("body", "arm1", "arm2", "leg1", "leg2", "tail"):
-            for tag_name, matrix, depth in frame_used_tag_entries(frame, part_key):
-                part = _get_cat_part(cat, part_key, partDir, palettes, catTree)
+            for tag_name, placement in frame_used_tag_placements(frame, part_key):
+                matrix, depth, cxform = placement
+                part = copy.deepcopy(_get_cat_part(cat, part_key, partDir, palettes, catTree))
+                part.applyTransform(cxform)
                 part.applyTransform(matrix)
                 assembly.append(sprite.PlacedSprite(
                     part, 0, depth, None, f"{PART_LABELS[part_key]}:{tag_name}"))
                 add_pool(tag_name)
-                frame_entries.append((depth, tag_name, (matrix.xscale, matrix.skew1,
-                                     matrix.skew2, matrix.yscale, matrix.xoffset, matrix.yoffset)))
+                add_entry(depth, tag_name, matrix, cxform)
 
         if second_cat is not None and second_equip is not None and extras_by_frame is not None:
             extras = extras_by_frame[i] if i < len(extras_by_frame) else {}
@@ -1818,21 +2308,27 @@ def _assemble_frames_for_first_cat(
                                       partDir, palettes, catTree, second_equip, extras, tag_pool,
                                       secondEquipNames, secondEquipDefaults)
 
+        # The weapon and the trinket are placed by this frame's own objects, so
+        # they are their own layers here, exactly like the body parts above.
+        if pool is not None:
+            _append_animation_items(
+                assembly, frame_entries, tag_pool, frame, pool)
+
         # A `character` PlaceObject2 places a whole character as a single layer
         # (the symbol it references is only a placeholder).
         if characterSprite is not None and characterByFrame is not None:
             entry = characterByFrame[i] if i < len(characterByFrame) else None
             if entry is not None:
-                matrix, depth = entry
+                matrix, depth, cxform = entry
                 whole = copy.deepcopy(characterSprite)
                 if characterOffset != (0.0, 0.0):
                     whole.applyTransform(_translation(characterOffset))
+                whole.applyTransform(cxform)
                 whole.applyTransform(matrix)
                 assembly.append(sprite.PlacedSprite(
                     whole, 0, depth, None, "character"))
                 add_pool("character")
-                frame_entries.append((depth, "character", (matrix.xscale, matrix.skew1,
-                                     matrix.skew2, matrix.yscale, matrix.xoffset, matrix.yoffset)))
+                add_entry(depth, "character", matrix, cxform)
 
         # objects we cannot read are skipped, but stay visible in
         # the cached metadata.
@@ -1841,6 +2337,7 @@ def _assemble_frames_for_first_cat(
             frame_entries.append((
                 int(depth) if depth is not None else 0,
                 str(skipped.get("tag", "UNSUPPORTED:?")),
+                None,
                 None,
             ))
 
@@ -1855,7 +2352,7 @@ def _assemble_frames_for_first_cat(
 def prompt_anim_name(anims: list[str], anim_name: str | None = None, allowPrompt: bool = True) -> str:
     while True:
         if anim_name:
-            matches = [a for a in anims if anim_name.lower() in a.lower()]
+            matches = [a for a in anims if anim_name.lower() == a.lower()]
             if matches:
                 return matches[0]
             if not allowPrompt:
@@ -1895,59 +2392,89 @@ def prompt_first_cat(catList: list[CustomCat], catId: str | None = None, allowPr
     return prompt_first_cat(catList, catId)
 
 
-def resolve_equipment_names(
+#: what an item slot's name is called in the interactive prompt
+SLOT_PROMPTS = {
+    "head": "Head Item",
+    "face": "Face Item",
+    "neck": "Neck Item",
+}
+
+
+def normalize_equipment(
     cat: CustomCat,
     mode: str = "default",
-    override: EquipNames | None = None,
+    override: Sequence[str | None] | None = None,
 ) -> tuple[EquipNames, bool]:
-    """Resolve which items a cat wears, without building any sprite.
+    """Resolve which armor a cat wears, without building any sprite.
 
-    Returns ``(head, face, neck)`` and whether the selection was explicit.  This
-    needs no SWF data at all, which is what lets a fully cached animation render
-    without touching the source files.
+    The result is always exactly the three armor slots, and the flag says
+    whether the selection was explicit.  No SWF data is needed, which is what
+    lets a fully cached animation render without touching the source files.
+
+    A weapon or a trinket has nothing to do with this: see :func:`normalize_handheld`.
     """
-    defaults = getDefaultEquipNames(cat.id)
     mode = (mode or "default").lower()
+    defaults = getDefaultEquipNames(cat.id)
 
-    if override is not None and any(item is not None for item in override):
-        names = tuple(list(override[:3]) + [None] * (3 - len(override[:3])))
-        return names, True
+    # An explicit selection replaces the default; a gap in it means "nothing in
+    # that slot", and a blank slot is how the CLI writes "none".  Asking for an
+    # item explicitly is not a default, so no default rule applies to it.
+    explicit = normalise_equipment(override)
+    if explicit is not None and any(item not in (None, "") for item in override or ()):
+        return explicit, True
 
     if mode == "none":
         return (None, None, None), True
 
-    if cat.id == "MedicCat":
-        logger.warning(
-            "MedicCat equipment is disabled because GIF export does not support semi-transparent pixels.")
-        if mode == "interactive":
-            input("Empty input will continue without selecting her equipment, input anything to proceed selecting her equipment.")
-        return (None, None, None), True
-
-    if mode == "default":
-        return defaults, False
-
     if mode == "interactive":
-        head_item, face_item, neck_item = defaults
-        if head_item or face_item or neck_item:
-            if head_item:
-                logger.info("'%s' has default head equipment: %s",
-                            cat.id, head_item)
-            if face_item:
-                logger.info("'%s' has default face equipment: %s",
-                            cat.id, face_item)
-            if neck_item:
-                logger.info("'%s' has default neck equipment: %s",
-                            cat.id, neck_item)
+        if any(defaults):
+            for slot, item in zip(EQUIP_SLOTS, defaults):
+                if item:
+                    logger.info("'%s' has default %s equipment: %s",
+                                cat.id, slot, item)
 
             if not input("Empty input will proceed using default equipments set, input anything to choose another equipments: "):
-                return (head_item, face_item, neck_item), False
+                return defaults, False
 
-        head_item = input("Head equipment (empty for none): ").strip() or None
-        face_item = input("Face equipment (empty for none): ").strip() or None
-        neck_item = input("Neck equipment (empty for none): ").strip() or None
-        return (head_item, face_item, neck_item), True
+        chosen = [input(f"{SLOT_PROMPTS[slot]} (empty for none): ").strip() or None
+                  for slot in EQUIP_SLOTS]
+        return normalise_equipment(chosen) or (None, None, None), True
 
-    return (None, None, None), True
+    # `default`.  MedicCat's armor is disabled::
+    # GIF export cannot represent her semi-transparent gear.
+    if cat.id == "MedicCat":
+        logger.warning(
+            "MedicCat equipment is disabled because GIF export does not support "
+            "semi-transparent pixels; her weapon and trinket are kept.")
+        return (None, None, None), False
+
+    return defaults, False
+
+
+def normalize_handheld(
+    cat: CustomCat,
+    handheld: Sequence[str | None] | None = None,
+) -> ItemPool:
+    """The weapon/trinket pool a cat's render may draw from.
+
+    An explicit request wins, then the cat's character file, then
+    :data:`DEFAULT_TRINKET`.  Nothing here reads an animation: the pool only
+    lists what could be shown, and the animation metadata decides what is.
+    """
+    return ItemPool.for_cat(cat.id, handheld)
+
+
+def resolve_equipment_names(
+    cat: CustomCat,
+    mode: str = "default",
+    override: Sequence[str | None] | None = None,
+) -> tuple[EquipNames, bool]:
+    """Like :func:`normalize_equipment`; the flag says whether it was explicit.
+
+    ``primary_cat`` is accepted for callers that share one code path for both
+    characters.  The armor slots are the same for both, so it changes nothing.
+    """
+    return normalize_equipment(cat, mode, override)
 
 
 def resolve_equipment(
@@ -1955,10 +2482,10 @@ def resolve_equipment(
     catpartTree: swf.SWF_Tree,
     cat: CustomCat,
     mode: str = "default",
-    override: EquipNames | None = None,
+    override: Sequence[str | None] | None = None,
 ) -> tuple[CatEquipment, EquipNames, bool]:
-    """Resolve a cat's equipment sprites and report which items ended up worn."""
-    names, explicit = resolve_equipment_names(cat, mode, override)
+    """Resolve a cat's armor sprites and report which items ended up worn."""
+    names, explicit = normalize_equipment(cat, mode, override)
     return getCatEquipment(partDir, catpartTree, *names), names, explicit
 
 
@@ -1973,12 +2500,16 @@ def _required_shape_names(
     equipNames: EquipNames | None,
     equipDefaults: EquipNames | None,
     headExpressions: set[str | None] | None = None,
+    items: ItemPool | None = None,
 ) -> set[str]:
     """Every reusable/shapes file a cat needs to be drawn across these frames.
 
     ``headExpressions=None`` collects the head variants the animation actually
     uses (the primary cat); pass ``{None}`` for a second cat rendered through the
     ``other_*`` overlay, whose head is always the default expression.
+
+    ``items`` adds the standalone weapon/trinket parts, which are cached under
+    the item name instead of under the cat.
     """
     names = {reusable.shape_cache_name(cat_id, part)
              for part in reusable.UNEQUIPPED_PARTS}
@@ -1986,16 +2517,22 @@ def _required_shape_names(
     if headExpressions is None:
         headExpressions = set()
         for frame in frames:
-            for tag in (getattr(frame, "used", {}) or {}):
-                if tag == "head":
-                    headExpressions.add(frame.face or None)
-                elif tag.startswith("head_"):
-                    headExpressions.add(tag.removeprefix("head_") or None)
+            # Only the layers a frame actually shows need their artwork cached;
+            # a `headblend_` decides which pose that is.
+            for tag, _placement in frame_head_layers(frame):
+                expression = animations.headTagExpression(tag)
+                headExpressions.add(expression if expression else (frame.face or None))
+
+        if not headExpressions:
+            headExpressions.add(None)
 
     for expression in headExpressions:
         names.add(reusable.shape_cache_name(
             cat_id, "head", expression=expression,
             equip=equipNames, defaults=equipDefaults))
+
+    if items is not None:
+        names |= items.cache_names()
 
     return names
 
@@ -2016,6 +2553,8 @@ def load_cached_animation(
     equipDefaults: EquipNames | None,
     equip2Names: EquipNames | None,
     equip2Defaults: EquipNames | None,
+    items: ItemPool | None = None,
+    items2: ItemPool | None = None,
 ) -> tuple[str, list[animations.CatFrame], dict[str, list[animations.CatFrame]]] | None:
     """Load an animation straight from reusable/ when it is completely cached.
 
@@ -2042,7 +2581,8 @@ def load_cached_animation(
                        requested_anim, error)
         return None
 
-    required = _required_shape_names(frames, cat.id, equipNames, equipDefaults)
+    required = _required_shape_names(frames, cat.id, equipNames, equipDefaults,
+                                     items=items)
     anims: dict[str, list[animations.CatFrame]] = {}
 
     if overlay_mode is not None:
@@ -2050,7 +2590,7 @@ def load_cached_animation(
             return None
         if overlay_mode == "parts":
             required |= _required_shape_names(frames, cat2.id, equip2Names, equip2Defaults,
-                                              headExpressions={None})
+                                              headExpressions={None}, items=items2)
         else:
             required.add(reusable.shape_cache_name(
                 cat2.id, "character", equip=equip2Names, defaults=equip2Defaults))
@@ -2077,12 +2617,13 @@ def exportCustomCats_interactive(
     cat_id: str | None,
     requested_anim: str | None = None,
     equip_mode: str = "default",
-    equip: EquipNames | None = None,
+    equip: Sequence[str | None] | None = None,
     cat2_id: str | None = None,
     equip2_mode: str = "default",
-    equip2: EquipNames | None = None,
+    equip2: Sequence[str | None] | None = None,
     generate_gif: bool = True,
-):
+    handheld: Sequence[str | None] | None = None,
+) -> None:
     palettes = palette.loadPalettes("./data/textures/palette.png")
 
     cat_list = getCustomCats()
@@ -2092,10 +2633,13 @@ def exportCustomCats_interactive(
             f"Cat '{cat_id}' was not found in the custom cat list.")
     logger.info("Selected primary cat '%s' for interactive export", cat.id)
 
+    # The armor is part of the cat; the weapon and the trinket are a pool of
+    # their own, and which of them is drawn comes from the animation.
     equip1Names, equip1Explicit = resolve_equipment_names(
         cat, equip_mode, equip)
     equip1CacheNames = None if not equip1Explicit else equip1Names
     equip1Defaults = getDefaultEquipNames(cat.id)
+    equip1Items = normalize_handheld(cat, handheld)
 
     # --- fully cached? then never touch the source SWFs ---------------------
     cached = None
@@ -2114,17 +2658,21 @@ def exportCustomCats_interactive(
         # check is retried once the cache told us whether one is involved.
         cached = load_cached_animation(
             requested_anim, cat, cat2ForCache,
-            equip1CacheNames, equip1Defaults, equip2CacheNames, equip2Defaults)
+            equip1CacheNames, equip1Defaults, equip2CacheNames, equip2Defaults,
+            items=equip1Items)
+
+    # The weapon and the trinket are read from the cat part SWF even on a fully
+    # cached animation, so the shape dump and the SWF tree are always prepared.
+    # Both are cache hits after the first run; the animation SWFs stay untouched.
+    partDir = ffdec.exportShapesIfNeeded(ffdecPath, catpart.CATPARTS_SWF)
+    catpartTree = swf.getSwfTree(catpart.CATPARTS_SWF)
+
+    catEquip = getCatEquipment(partDir, catpartTree, *equip1Names)
+    secondCat = SecondCatResolver(cat_list, cat2_id, equip2_mode, equip2)
 
     if cached is not None:
         anim_name, cat_anim, anims = cached
-        secondCat = SecondCatResolver(cat_list, cat2_id, equip2_mode, equip2)
-        frames = render_animation(
-            cat, None, palettes, None, cat_anim, anim_name, anims,
-            CatEquipment(), equip1CacheNames, equip1Defaults, secondCat)
     else:
-        partDir = ffdec.exportShapesIfNeeded(ffdecPath, catpart.CATPARTS_SWF)
-        catpartTree = swf.getSwfTree(catpart.CATPARTS_SWF)
         anims = animations.getCatAnims()
         anim_list = list(anims.keys())
 
@@ -2135,37 +2683,33 @@ def exportCustomCats_interactive(
         logger.info("Loading animation '%s' with %d frames",
                     anim_name, len(cat_anim))
 
-        catEquip = getCatEquipment(partDir, catpartTree, *equip1Names)
-
-        # the second cat is asked for at the moment the animation
-        # places it, and the answer is reused for the rest of the run.
-        secondCat = SecondCatResolver(cat_list, cat2_id, equip2_mode, equip2)
-
-        frames = render_animation(
-            cat, partDir, palettes, catpartTree, cat_anim, anim_name, anims,
-            catEquip, equip1CacheNames, equip1Defaults, secondCat)
+    frames = render_animation(
+        cat, partDir, palettes, catpartTree, cat_anim, anim_name, anims,
+        catEquip, equip1CacheNames, equip1Defaults, secondCat,
+        pool=equip1Items)
 
     os.makedirs(outdir, exist_ok=True)
-    logger.info("Saving exported frames for '%s' animation '%s' to '%s'",
+    logger.info("Start saving exported frames for '%s' animation '%s' to '%s'",
                 cat.id, anim_name, outdir)
     save_cat_output(outdir, cat.id, anim_name,
                     frames, generate_gif=generate_gif)
 
 
 def exportCustomCats_batch(
-    ffdecPath,
-    anim_name: str,
-    outdir,
+    ffdecPath: str,
+    anim_name: str | None,
+    outdir: str,
     cat2_id: str | None = None,
     equip2_mode: str = "default",
-    equip2: EquipNames | None = None,
+    equip2: Sequence[str | None] | None = None,
     generate_gif: bool = True,
-):
-    """批量导出所有猫（使用各自的 class_anis 动画）"""
+) -> int:
+    """批量导出所有猫（如果找不到则直接使用各自的 class_anis 动画）"""
     partDir = ffdec.exportShapesIfNeeded(ffdecPath, catpart.CATPARTS_SWF)
     palettes = palette.loadPalettes("./data/textures/palette.png")
     catpartTree = swf.getSwfTree(catpart.CATPARTS_SWF)
     anims = animations.getCatAnims()
+    list_anim = list(anims.keys())
     cat_list = getCustomCats()
 
     batch_cats = [c for c in cat_list if c.id in BATCH_CAT_NAMES]
@@ -2179,29 +2723,32 @@ def exportCustomCats_batch(
     secondCat = SecondCatResolver(
         cat_list, cat2_id, equip2_mode, equip2)
 
+    def getClassIdleF(cat: CustomCat) -> str:
+        out = f"{cat.id.capitalize().strip("cat")}IdleF"
+        if any(out.lower() == a.lower() for a in list_anim):
+            return out
+        else:
+            return "idleF"
+
     count = 0
     for cat in batch_cats:
-        if anim_name is None or not any(anim_name.lower() == a.lower() for a in anims):
-            new_name = f"{cat.id.strip("Cat").strip("cat")}IdleF"
-            if any(new_name.lower() == a.lower() for a in anims):
-                logging.warning(
-                    f"Cat {cat.id}: animation '{anim_name}' not found, using '{new_name}'")
-                anim_name = new_name
-            else:
-                logging.warning(
-                    f"Cat {cat.id}: animation '{anim_name}' not found, using 'idleF'")
-                anim_name = "idleF"
-        cat_anim = anims[anim_name]
+        _anim_name = anim_name
+        if not _anim_name or not any(_anim_name.lower() == a.lower() for a in list_anim):
+            _anim_name = getClassIdleF(cat)
+            logging.warning(
+                f"Cat {cat.id}: animation '{anim_name}' not found, using '{_anim_name}'")
+        cat_anim = anims[_anim_name]
 
         catEquip, equipNames, equipExplicit = resolve_equipment(
             partDir, catpartTree, cat, "default")
 
         try:
             frames = render_animation(
-                cat, partDir, palettes, catpartTree, cat_anim, anim_name, anims,
+                cat, partDir, palettes, catpartTree, cat_anim, _anim_name, anims,
                 catEquip, None if not equipExplicit else equipNames,
-                getDefaultEquipNames(cat.id), secondCat)
-            save_cat_output(outdir, cat.id, anim_name, frames,
+                getDefaultEquipNames(cat.id), secondCat,
+                pool=normalize_handheld(cat))
+            save_cat_output(outdir, cat.id, _anim_name, frames,
                             generate_gif=generate_gif)
             count += 1
             logging.info(f"Exported {cat.id}")
@@ -2209,3 +2756,7 @@ def exportCustomCats_batch(
             logging.error(f"Failed to export {cat.id}: {e}")
             continue
     return count
+
+
+if __name__ == "__main__":
+    exportCustomCats_batch(ffdecDefault, "tanturmF", outDirDefault)

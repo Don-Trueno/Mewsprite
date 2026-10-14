@@ -21,7 +21,7 @@ class Status:
 
 def exportStatuses(svgCropper: svg.SvgCropper, ffdecPath: str, statuses: list[Status], outdir: str):
     # this sucks
-    statusDir = ffdec.exportSpritesIfNeeded(ffdecPath, STATUS_SWF)
+    statusDir = ffdec.exportShapesIfNeeded(ffdecPath, STATUS_SWF)
 
     #ffdec.export(ffdecPath, STATUS_SWF, ["shape"], "./cache/" + pathlib.Path(STATUS_SWF).stem)
     dumpdir = "./cache/ui"

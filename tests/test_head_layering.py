@@ -3,10 +3,13 @@
 The order is fixed by hand instead of being derived from the `CatHeadPlacements`
 sprite, listed from the bottom (drawn first, covered by later layers) to the top:
 
-    front pose: neckItem < lear < rear < head < leye < lbrow < mouth
+    front pose: neckItem < lear < rear < head < mouth < leye < lbrow
                        < reye < rbrow < headItem < faceItem
-    back pose:  faceItem < leye < lbrow < mouth < reye < rbrow
+    back pose:  faceItem < leye < lbrow < reye < rbrow < mouth
                        < lear < rear < head < headItem < neckItem
+
+These tuples are the contract: if the order in `custom_cats` is changed on
+purpose, update them here in the same commit.
 """
 
 import os
@@ -23,9 +26,9 @@ from src.catgen import swf_tree as tree
 from src.util import svg_tools
 from src import custom_cats
 
-FRONT_ORDER = ("neckItem", "lear", "rear", "head", "leye", "lbrow", "mouth",
+FRONT_ORDER = ("neckItem", "lear", "rear", "head", "mouth", "leye", "lbrow",
                "reye", "rbrow", "headItem", "faceItem")
-BACK_ORDER = ("faceItem", "leye", "lbrow", "mouth", "reye", "rbrow",
+BACK_ORDER = ("faceItem", "leye", "lbrow", "reye", "rbrow", "mouth",
               "lear", "rear", "head", "headItem", "neckItem")
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -93,11 +96,11 @@ class HeadLayerOrderTests(unittest.TestCase):
         self.assertLess(depths["neckItem"], depths["lear"])
         self.assertLess(depths["lear"], depths["rear"])
         self.assertLess(depths["rear"], depths["head"])
-        # face features on top of the head, mouth between the eyes
-        self.assertLess(depths["head"], depths["leye"])
+        # face features on top of the head, mouth below the left eye
+        self.assertLess(depths["head"], depths["mouth"])
+        self.assertLess(depths["mouth"], depths["leye"])
         self.assertLess(depths["leye"], depths["lbrow"])
-        self.assertLess(depths["lbrow"], depths["mouth"])
-        self.assertLess(depths["mouth"], depths["reye"])
+        self.assertLess(depths["lbrow"], depths["reye"])
         self.assertLess(depths["reye"], depths["rbrow"])
         # gear: head item, then face item on top
         self.assertLess(depths["rbrow"], depths["headItem"])
@@ -107,7 +110,8 @@ class HeadLayerOrderTests(unittest.TestCase):
         depths = custom_cats._head_layer_depths(back=True)
         # face item at the very bottom, then the face features behind the head
         self.assertLess(depths["faceItem"], depths["leye"])
-        self.assertLess(depths["rbrow"], depths["lear"])
+        self.assertLess(depths["rbrow"], depths["mouth"])
+        self.assertLess(depths["mouth"], depths["lear"])
         self.assertLess(depths["lear"], depths["rear"])
         self.assertLess(depths["rear"], depths["head"])
         # head item, then neck item on top

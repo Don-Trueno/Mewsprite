@@ -12,7 +12,7 @@ Part file naming rules:
       <cat-id>-<part>.svg                  e.g. ButcherCat-tail.svg
 
 * parts that are composed together with the worn equipment (head, character).
-  The optional expression comes first, then the equipment set in the same
+  The optional expression comes first, then the three armor slots in the same
   ``head;face;neck`` order the CLI uses::
 
       <cat-id>-head.svg                    default equipment, default face
@@ -21,6 +21,14 @@ Part file naming rules:
       <cat-id>-head-<head>-<face>-<neck>.svg
       <cat-id>-character.svg               whole cat, used for the `character` part
       <cat-id>-character-smile-<...>.svg
+
+* standalone items, cached under their own name because they belong to no cat::
+
+      <item-name>.svg                      a weapon or a trinket
+
+The weapon and the trinket are *not* part of a cat part's name: the animation
+places them, and they are their own layers, so a cat's head looks the same
+whichever weapon it happens to hold.
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ from . import sprite as sprite_mod
 
 logger = logging.getLogger(__name__)
 
-REUSABLE_DIR = "./reusable"
+REUSABLE_DIR = "./cache"
 ANIMS_DIR = os.path.join(REUSABLE_DIR, "anims")
 SHAPES_DIR = os.path.join(REUSABLE_DIR, "shapes")
 
@@ -52,10 +60,14 @@ NO_EQUIPMENT = "None"
 
 #: bump when the way a part sprite is composed changes, so old cached artwork is
 #: discarded instead of silently rendering with the previous composition
-SHAPE_CACHE_VERSION = "4"
+SHAPE_CACHE_VERSION = "7"
 
 #: marker file holding SHAPE_CACHE_VERSION next to the part SVGs
 VERSION_FILE = ".version"
+
+#: bump when the *shape* of the animation metadata changes, so a cached animation
+#: written by an older pipeline is ignored instead of rendering incompletely
+ANIM_CACHE_VERSION = 2
 
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_.\-]")
 
@@ -73,36 +85,50 @@ def _safe(token: str) -> str:
     return _UNSAFE_NAME_CHARS.sub("_", token)
 
 
+#: how many equipment slots a fully specified selection has: head, face, neck,
+#: weapon, trinket -- the order the CLI takes them in.
+EQUIPMENT_SLOTS = 5
+
+#: how many of those slots a cat part depends on.  The weapon and the trinket
+#: are standalone items with their own cache file, so only the armor slots are
+#: part of a cat part's name.
+ARMOR_SLOTS = 3
+
+
 def equipment_suffix(equip: Equipment | None, defaults: Equipment | None) -> str:
-    """Return the ``<-装备>`` part of a cached part file name.
+    """Return the ``<-装备>`` part of a cached cat part file name.
 
     ``equip=None`` means "use the cat's default equipment" and yields no suffix.
     An explicit selection that happens to equal the default also yields no
     suffix, because both describe exactly the same artwork.  An explicit empty
     selection yields ``-None``.
+
+    Only the armor slots are written down: a weapon or a trinket is drawn from
+    its own cached item file, so it never changes a cat part's name.
     """
     if equip is None:
         return ""
 
-    head, face, neck = _as_triple(equip)
-    if defaults is not None and (head, face, neck) == _as_triple(defaults):
+    selection = _as_slots(equip, ARMOR_SLOTS)
+    if defaults is not None and selection == _as_slots(defaults, ARMOR_SLOTS):
         return ""
 
-    if not head and not face and not neck:
+    if not any(selection):
         return f"-{NO_EQUIPMENT}"
 
     # head;face;neck, the same order the CLI uses.
     return "-" + "-".join(
         NO_EQUIPMENT if item is None or item == "" else _safe(str(item))
-        for item in (head, face, neck)
+        for item in selection
     )
 
 
-def _as_triple(values: Equipment) -> tuple[str | None, str | None, str | None]:
-    items = list(values)[:3]
-    while len(items) < 3:
+def _as_slots(values: Equipment, slots: int) -> tuple[str | None, ...]:
+    """Normalise an equipment selection to exactly ``slots`` entries."""
+    items: list[str | None] = list(values)[:slots]
+    while len(items) < slots:
         items.append(None)
-    return tuple(None if item in (None, "") else str(item) for item in items)  # type: ignore[return-value]
+    return tuple(None if item in (None, "") else str(item) for item in items)
 
 
 def shape_cache_name(
@@ -125,6 +151,15 @@ def shape_cache_name(
         name += f"-{_safe(expression)}"
 
     return name + equipment_suffix(equip, defaults) + ".svg"
+
+
+def item_cache_name(item_name: str) -> str:
+    """Build the ``reusable/shapes`` file name of one standalone item.
+
+    A weapon or a trinket is not part of any cat, so -- unlike a cat part -- its
+    name carries no cat id and no equipment suffix.
+    """
+    return _safe(item_name) + ".svg"
 
 
 def shape_cache_path(name: str) -> str:
@@ -265,6 +300,13 @@ def load_anim_cache(anim_name: str) -> dict[str, Any] | None:
 
     if not isinstance(payload, dict) or "frames" not in payload:
         logger.warning("Ignoring malformed reusable animation '%s'", path)
+        return None
+
+    # Metadata written before the colorTransform was carried through would render
+    # without the tint and the cross-fades, so it is treated as missing.
+    if payload.get("metadata_version") != ANIM_CACHE_VERSION:
+        logger.debug("Ignoring reusable animation '%s' written as metadata version %r",
+                     path, payload.get("metadata_version"))
         return None
 
     return payload

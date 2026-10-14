@@ -108,7 +108,7 @@ def getPassives() -> list[Passive]:
     return out
 
 def exportPassives(svgCropper: svg.SvgCropper, ffdecPath: str, passives: list[Passive], outfolder = "./out"):
-    dumpdir = ffdec.exportSpritesIfNeeded(ffdecPath, ICONS_SWF)
+    dumpdir = ffdec.exportShapesIfNeeded(ffdecPath, ICONS_SWF)
     dirs = os.listdir(dumpdir)
     for dir in dirs:
         if (dir.endswith("PassiveIcon")):
@@ -159,7 +159,7 @@ def getActives() -> list[Active]:
     return out
 
 def exportActives(svgCropper: svg.SvgCropper, ffdecPath: str, actives: list[Active], outfolder = "./out"):
-    dumpdir = ffdec.exportSpritesIfNeeded(ffdecPath, ICONS_SWF)
+    dumpdir = ffdec.exportShapesIfNeeded(ffdecPath, ICONS_SWF)
     dirs = os.listdir(dumpdir)
     for dir in dirs:
         if (dir.endswith("AbilityIcon")):

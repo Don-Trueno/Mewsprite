@@ -6,6 +6,10 @@ from ..util import ffdec_tools as ffdec
 
 CATPARTS_SWF = "./data/swfs/catparts.swf"
 
+#: a placement list may mix the raw SWF objects with sprites we built ourselves
+PlacedObjects = list[swf.PlacedObject | sprite.PlacedSprite]
+
+
 class HeadPlacements:
     head: swf.PlacedObject
 
@@ -67,7 +71,7 @@ def getCatComponent(dumpdir: str, tree: swf.SWF_Tree, components: swf.SWF_Tree.S
     frame = components.frames[id]
 
     textureObj = None
-    objs = []
+    objs: PlacedObjects = []
     for obj in frame.objs:
         if (obj.name == "tex"):
             assert(textureObj == None)
@@ -98,7 +102,7 @@ def getCatHeadShape(dumpdir: str, tree: swf.SWF_Tree, heads: swf.SWF_Tree.Sprite
     frame = heads.frames[id]
 
     textureObj = None
-    objs = []
+    objs: PlacedObjects = []
     for obj in frame.objs:
         if (obj.name == "tex"):
             assert(textureObj == None)

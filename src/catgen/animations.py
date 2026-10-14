@@ -1,36 +1,90 @@
 from . import swf_tree as tree
 
 import logging
+from typing import Any
 
 CATANIS_SWF1 = "./data/swfs/catanis.swf"
 CATANIS_SWF2 = "./data/swfs/catanis2.swf"
 
+#: One placement of a part: its matrix, its display-list depth and the SWF
+#: `colorTransform` that goes with it (``None`` when the tag carries none).
+#: The color transform drives part tinting and, importantly, the alpha used by
+#: cross-fades such as `headblend_*`.
+#:
+#: Written without string forward references on purpose: the alias is used from
+#: other modules' annotations, and a quoted ``"tree.swf.CXFORM"`` would only
+#: resolve inside this one (`typing.get_type_hints` evaluates it in the *using*
+#: module's globals, where `tree` does not exist).
+Placement = tuple[tree.swf.Matrix, int, tree.swf.CXFORM | None]
+
+
+def _defaultPlacement() -> Placement:
+    """The "this frame places nothing" placeholder (identity at depth 0)."""
+    return (tree.swf.Matrix(), 0, None)
+
+
+def asPlacement(value: Any) -> Placement:
+    """Normalise a placement, accepting the legacy ``(matrix, depth)`` shape too."""
+    if len(value) >= 3:
+        return (value[0], value[1], value[2])
+    return (value[0], value[1], None)
+
+
+#: Head layers come in more than one tag family.  ``head_<pose>`` is an
+#: expression of the head itself; ``headblend_<pose>`` is the outgoing expression
+#: the SWF parks at a fixed spot (and a low depth) so the head can cross-fade away
+#: from it, so it belongs in the tag pool but is not part of the visible frame.
+HEAD_TAG_FAMILIES = ("head_", "headblend_")
+HEAD_BLEND_PREFIX = "headblend_"
+
+
+def isHeadTag(name: str) -> bool:
+    """True for ``head``, ``head_<pose>`` and ``headblend_<pose>``."""
+    return name == "head" or name.startswith(HEAD_TAG_FAMILIES)
+
+
+def isHeadBlendTag(name: str) -> bool:
+    """True for ``headblend_<pose>``, the parked cross-fade source."""
+    return name.startswith(HEAD_BLEND_PREFIX)
+
+
+def headTagExpression(name: str) -> str | None:
+    """The face pose a head layer tag stands for.
+
+    ``head`` itself means "the frame's own pose", which this returns as ``None``.
+    """
+    for family in HEAD_TAG_FAMILIES:
+        if name.startswith(family):
+            return name[len(family):] or None
+    return None
+
+
 class CatFrame:
-    head: tuple[tree.swf.Matrix, int]
-    body: tuple[tree.swf.Matrix, int]
-    arm1: tuple[tree.swf.Matrix, int]
-    arm2: tuple[tree.swf.Matrix, int]
-    leg1: tuple[tree.swf.Matrix, int]
-    leg2: tuple[tree.swf.Matrix, int]
-    tail: tuple[tree.swf.Matrix, int]
+    head: "Placement"
+    body: "Placement"
+    arm1: "Placement"
+    arm2: "Placement"
+    leg1: "Placement"
+    leg2: "Placement"
+    tail: "Placement"
 
     face: str
 
-    extra: dict[str, tuple[tree.swf.Matrix, int]]
-    used: dict[str, list[tuple[tree.swf.Matrix, int]]]
+    extra: dict[str, "Placement"]
+    used: dict[str, list["Placement"]]
     skipped: list[dict]
 
     def __init__(self):
-        self.head = (tree.swf.Matrix(), 0)
-        self.body = (tree.swf.Matrix(), 0)
+        self.head = _defaultPlacement()
+        self.body = _defaultPlacement()
 
-        self.arm1 = (tree.swf.Matrix(), 0)
+        self.arm1 = _defaultPlacement()
 
-        self.arm2 = (tree.swf.Matrix(), 0)
+        self.arm2 = _defaultPlacement()
 
-        self.leg1 = (tree.swf.Matrix(), 0)
-        self.leg2 = (tree.swf.Matrix(), 0)
-        self.tail = (tree.swf.Matrix(), 0)
+        self.leg1 = _defaultPlacement()
+        self.leg2 = _defaultPlacement()
+        self.tail = _defaultPlacement()
 
         self.extra = {}
         self.used = {}
@@ -39,10 +93,11 @@ class CatFrame:
         self.face = ""
 
 
-def _record_used_tag(used: dict[str, list[tuple[tree.swf.Matrix, int]]], name: str, xform: tree.swf.Matrix | None, depth: int) -> None:
+def _record_used_tag(used: dict[str, list[Placement]], name: str, xform: tree.swf.Matrix | None, depth: int, cxform: tree.swf.CXFORM | None = None) -> None:
     if not name:
         return
-    used.setdefault(name, []).append(((xform or tree.swf.Matrix()), depth))
+    used.setdefault(name, []).append(
+        ((xform or tree.swf.Matrix()), depth, cxform))
 
 
 def finalizeFrame(out: CatFrame) -> CatFrame:
@@ -50,42 +105,44 @@ def finalizeFrame(out: CatFrame) -> CatFrame:
     used_tags = out.used
 
     head_candidates = [
-        (name, value[0], value[1])
+        (name, asPlacement(value))
         for name, value_list in used_tags.items()
         for value in value_list
-        if name.startswith("head")
+        if isHeadTag(name)
     ]
     if head_candidates:
-        best_name, best_xform, best_depth = max(head_candidates, key=lambda item: item[2])
-        out.head = (best_xform, best_depth)
-        if "_" in best_name:
-            out.face = best_name.removeprefix("head_")
+        best_name, best = max(head_candidates, key=lambda item: item[1][1])
+        out.head = best
+        expression = headTagExpression(best_name)
+        if expression:
+            out.face = expression
 
     for tag_name in ("body", "arm1", "arm2", "leg1", "leg2", "tail"):
         if tag_name in used_tags and used_tags[tag_name]:
             values = sorted(used_tags[tag_name], key=lambda item: item[1])
-            out.__dict__[tag_name] = values[-1]
+            out.__dict__[tag_name] = asPlacement(values[-1])
 
     out.extra = {}
     for name, value_list in used_tags.items():
         if name in {"body", "arm1", "arm2", "leg1", "leg2", "tail"}:
             continue
-        if name.startswith("head"):
+        if isHeadTag(name):
             continue
         if value_list:
-            out.extra[name] = sorted(value_list, key=lambda item: item[1])[-1]
+            out.extra[name] = asPlacement(
+                sorted(value_list, key=lambda item: item[1])[-1])
 
     return out
 
 
 def catFrameFromObjs(objs: list[tree.PlacedObject], skipped: list[dict] | None = None) -> CatFrame:
     out = CatFrame()
-    used_tags: dict[str, list[tuple[tree.swf.Matrix, int]]] = {}
+    used_tags: dict[str, list[Placement]] = {}
 
     for obj in objs:
         if not obj.name:
             continue
-        _record_used_tag(used_tags, obj.name, obj.xform, obj.depth)
+        _record_used_tag(used_tags, obj.name, obj.xform, obj.depth, obj.cxform)
 
     out.used = used_tags
     out.skipped = list(skipped or [])
@@ -121,11 +178,49 @@ def framesFromAnimCache(payload: dict) -> list[CatFrame]:
             matrix = tree.swf.Matrix()
             (matrix.xscale, matrix.skew1, matrix.skew2,
              matrix.yscale, matrix.xoffset, matrix.yoffset) = (float(v) for v in transform)
-            frame.used.setdefault(tag, []).append((matrix, int(depth)))
+            frame.used.setdefault(tag, []).append(
+                (matrix, int(depth), colorTransformFromCache(entry.get("colorTransform"))))
 
         out.append(finalizeFrame(frame))
 
     return out
+
+
+def colorTransformToCache(cxform: "tree.swf.CXFORM | None") -> dict | None:
+    """Serialise a SWF color transform for the reusable metadata."""
+    if cxform is None:
+        return None
+    return {
+        "mult": [cxform.redMult, cxform.greenMult, cxform.blueMult, cxform.alphaMult],
+        "add": [cxform.redAdd, cxform.greenAdd, cxform.blueAdd, cxform.alphaAdd],
+    }
+
+
+def colorTransformFromCache(data: dict | None) -> "tree.swf.CXFORM | None":
+    """Rebuild a SWF color transform from the reusable metadata."""
+    if not data:
+        return None
+
+    cxform = tree.swf.CXFORM()
+    mult = data.get("mult") or [1.0, 1.0, 1.0, 1.0]
+    add = data.get("add") or [0, 0, 0, 0]
+    (cxform.redMult, cxform.greenMult, cxform.blueMult,
+     cxform.alphaMult) = (float(v) for v in mult)
+    # `CXFORM` keeps the add terms as the signed integers the SWF stores
+    (cxform.redAdd, cxform.greenAdd, cxform.blueAdd,
+     cxform.alphaAdd) = (int(v) for v in add)
+    return cxform
+
+
+def isIdentityColorTransform(cxform: "tree.swf.CXFORM | None") -> bool:
+    """True when a color transform would not change anything."""
+    if cxform is None:
+        return True
+    return (cxform.redMult == 1.0 and cxform.greenMult == 1.0
+            and cxform.blueMult == 1.0 and cxform.alphaMult == 1.0
+            and cxform.redAdd == 0 and cxform.greenAdd == 0
+            and cxform.blueAdd == 0 and cxform.alphaAdd == 0)
+
 
 def aniFromSprite(defSprite: tree.SWF_Tree.SpriteNode) -> list[CatFrame]:
     out = []
@@ -134,8 +229,9 @@ def aniFromSprite(defSprite: tree.SWF_Tree.SpriteNode) -> list[CatFrame]:
 
     return out
 
+
 def anisFromSprite(swfTree: tree.SWF_Tree, defSprite: tree.SWF_Tree.SpriteNode) -> dict[str, list[CatFrame]]:
-    out = {}
+    out: dict[str, list[CatFrame]] = {}
     for frame in defSprite.frames:
         if (frame.name == ""):
             continue
@@ -150,15 +246,21 @@ def anisFromSprite(swfTree: tree.SWF_Tree, defSprite: tree.SWF_Tree.SpriteNode) 
             continue
 
         node = swfTree.get(frame.objs[0].id)
-        out[frame.name] = aniFromSprite(node)
-        
+        if isinstance(node, tree.SWF_Tree.SpriteNode):
+            out[frame.name] = aniFromSprite(node)
+
     return out
 
-def getCatAnims() -> dict[str, list[CatFrame]]:
-    anis1 = tree.getSwfTree(CATANIS_SWF1)
-    out = anisFromSprite(anis1, anis1.get("CatTest"))
 
-    anis2 = tree.getSwfTree(CATANIS_SWF2)
-    out |= anisFromSprite(anis2, anis2.get("_Append_CatTest"))
+def getCatAnims() -> dict[str, list[CatFrame]]:
+    out: dict[str, list[CatFrame]] = {}
+
+    for swfPath, rootName in ((CATANIS_SWF1, "CatTest"), (CATANIS_SWF2, "_Append_CatTest")):
+        swfTree = tree.getSwfTree(swfPath)
+        root = swfTree.get(rootName)
+        if not isinstance(root, tree.SWF_Tree.SpriteNode):
+            logging.warning("SWF '%s' has no '%s' sprite; skipping it", swfPath, rootName)
+            continue
+        out |= anisFromSprite(swfTree, root)
 
     return out
