@@ -1,7 +1,7 @@
 # Mewsprite
 
 ## 项目介绍
-本项目由Mewgenerate<!--仓库链接？-->分叉，旨在更方便地自定义不同动作与猫族生物（Catgen）的动作，生成gif动画并导出。
+本项目由[Mewgenerate](https://github.com/Sploder12/mewgenerate)分叉，旨在更方便地自定义不同动作与猫族生物（Catgen）的动作，生成gif动画并导出。
 
 ## 仓库结构
 ```

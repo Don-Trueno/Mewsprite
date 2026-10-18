@@ -46,6 +46,18 @@ MEASURE_DPI = 96.0
 #: a pixel counts towards the artwork extent only above this alpha (0-255)
 BOUNDS_ALPHA_THRESHOLD = 128
 
+#: Where the game anchors the second cat relative to the artwork `character`
+#: stands in for.  `character` references a runtime-only placeholder, so its
+#: matrix has to be applied to our whole-cat sprite with this correction; drawn
+#: straight on top of the rest pose the second cat lands about 0.6 cat bodies too
+#: low and 0.1 too far left.
+#:
+#: The placeholder is positioned in the canonical rest-pose space, which is why
+#: the animation's own rest displacement is *not* added on top: `terminatorPunchF`
+#: carries exactly -48 in its rest offset, and letting both through would shift its
+#: second cat twice as far as its `other_*` parts (the explicit ground truth) say.
+CHARACTER_LAYER_OFFSET = (13.0, -48.0)
+
 #: how far (in user units) a nearly transparent pixel may sit from the solid core
 #: and still count as an antialiased edge rather than a rendering artefact
 BOUNDS_HALO = 4.0
@@ -580,9 +592,10 @@ def _get_cat_character(
 ) -> sprite.Sprite:
     """Whole-cat sprite used by the `character` part, reused through reusable/shapes.
 
-    Cached as ``<cat-id>-character<-表情><-装备>.svg``.  The cached artwork
-    is the cat's canonical rest pose, which every animation shares up to a
-    constant translation (see :func:`_rest_pose_offset`).
+    Cached as ``<cat-id>-character<-表情><-装备>.svg``.  The cached artwork is the
+    cat's canonical rest pose (``idleF`` frame 0), which is also the space the
+    `character` placeholder's matrix is expressed in -- see
+    :data:`CHARACTER_LAYER_OFFSET` and :func:`_assemble_frames_for_first_cat`.
 
     A part file name can only describe the armor, so this sprite never contains
     a handheld item.
@@ -608,6 +621,10 @@ def _rest_pose_offset(restFrame: animations.CatFrame, frame: animations.CatFrame
     differently inside the frame, so a single constant translation converts one
     into the other.  Verified for all `character` animations by
     tests/test_character_overlay.py.
+
+    Kept as the documented invariant of the rest pose; the `character` layer no
+    longer needs it, because the placeholder's matrix is already expressed in the
+    canonical rest-pose space.
     """
     for key in ("body", "head", "tail", "leg1", "leg2", "arm1", "arm2"):
         reference = getattr(restFrame, key, None)
@@ -1986,7 +2003,6 @@ def render_animation(
     characterSprite = _get_cat_character(
         cat2, catEquip2, equip2Names, equip2Defaults, partDir, palettes,
         catpartTree, restFrame)
-    characterOffset = _rest_pose_offset(restFrame, cat_anim[0])
 
     characterByFrame: list[animations.Placement | None] = []
     for aframe in cat_anim:
@@ -2004,7 +2020,7 @@ def render_animation(
     frames, tag_pool, frames_info = _assemble_frames_for_first_cat(
         cat, partDir, palettes, cat_anim, catpartTree, catEquip,
         None, None, None, equipNames, equipDefaults, None, None,
-        characterByFrame, characterSprite, characterOffset, pool=items)
+        characterByFrame, characterSprite, pool=items)
     _write_anim_metadata(anim_name, tag_pool, frames_info,
                          complete=True, overlay_mode=overlay_mode, items=items)
     logger.info("Added second cat '%s' as a whole-body character layer", cat2.id)
@@ -2244,7 +2260,6 @@ def _assemble_frames_for_first_cat(
     secondEquipDefaults: EquipNames | None = None,
     characterByFrame: list[animations.Placement | None] | None = None,
     characterSprite: sprite.Sprite | None = None,
-    characterOffset: tuple[float, float] = (0.0, 0.0),
     pool: ItemPool | None = None,
 ) -> tuple[list[sprite.Sprite], list[str], list[list[FrameEntry]]]:
     out = []
@@ -2321,8 +2336,10 @@ def _assemble_frames_for_first_cat(
             if entry is not None:
                 matrix, depth, cxform = entry
                 whole = copy.deepcopy(characterSprite)
-                if characterOffset != (0.0, 0.0):
-                    whole.applyTransform(_translation(characterOffset))
+                # The placeholder lives in the canonical rest-pose space, so the
+                # animation's own rest displacement must not be added on top of it
+                # (see CHARACTER_LAYER_OFFSET).
+                whole.applyTransform(_translation(CHARACTER_LAYER_OFFSET))
                 whole.applyTransform(cxform)
                 whole.applyTransform(matrix)
                 assembly.append(sprite.PlacedSprite(
