@@ -1,32 +1,38 @@
+## 0.2.2
+(This modification is assisted by DeepSeek-V41-flash)
+
+### Fixes
+- Fix the issue where the position of the second cat is too low in the animation where the second cat is involved as a whole (e.g. `bearHugF`).
+
 ## 0.2.1
-（本次改动使用 DeepSeek-V41-flash 辅助）
+(This modification is assisted by DeepSeek-V41-flash)
 
-### 修复
-- 修复了猫朝左看时，嘴部异常偏上的问题。
-- 现在批量导出时，如果输入的动画名称错误，会正确应用每个职业各自的待机动作。
-  - 对于武僧（`MonkCat`），只使用他的近战模式待机动作。
+### Fixes
+- Fixed the issue where the cat's mouth was positioned abnormally high when looking to the left.
+- Now, when exporting in batches, if the input animation name is incorrect, the respective idle actions for each profession will be correctly applied.
+- For the Monk (`MonkCat`), only his melee mode idle actions are used.
 
-### 新增
-- 新增对猫的武器（Weapon）与饰品（Trinket、Consumable）的支持。
-  - CLI中新增字段`--weapon <id|none>`、`--trinket <id|none>`。
-  - `SHAPE_CACHE_VERSION` 提升到 `6`：旧缓存会自动重建。
-- 新增对原SWF中`colorTransform`字段的解析，动画中猫可以被染色了。
+### Additions
+- Added support for the cat's weapons (Weapon) and accessories (Trinket, Consumable).
+- CLI now includes fields `--weapon <id|none>` and `--trinket <id|none>`.
+- `SHAPE_CACHE_VERSION` has been upgraded to `6`: old caches will be automatically rebuilt.
+- Added parsing of the `colorTransform` field from the original SWF, allowing the cat to be colored in the animation.
 
 ## 0.2.0
-（本次改动使用 DeepSeek-V41-flash 辅助）
+(This modification is assisted by DeepSeek-V41-flash)
 
-### 修改
-- 将原项目的 GIF 生成逻辑优化为逐帧流式写入，大幅减少内存与磁盘占用。
-- 现在会正确裁剪最终 GIF 图像四周的空白像素。
-- 移除 InkScape 依赖。
+### Changes
+- Optimized the GIF generation logic of the original project to stream frame-by-frame writing, significantly reducing memory and disk usage.
+- Now, the final GIF image will correctly crop the surrounding blank pixels.
+- Removed the dependency on InkScape.
 
-**性能对比**
+**Performance Comparison**
 
-（使用 310 帧、1239×1242、Q16-HDRI 每像素 8 字节图像测试）
+(Using 310 frames, 1239×1242, Q16-HDRI, 8 bytes per pixel image for testing)
 
-|| 原有 wand 序列<br> + coalesce | 改进后 |
+|| Original wand sequence + coalesce | Improved version |
 |----|:----:|:----:|
-| 峰值内存 | 14.6 GB | 600 MB |
-| 临时目录峰值 | ~3.0 GB | ~0 |
-| GIF 组装耗时 | 354 s | 132 s |
-| GIF 体积 | 8.12 MB | 6.57 MB |
+| Peak Memory | 14.6 GB | 600 MB |
+| Peak Temporary Directory Size | ~3.0 GB | ~0 |
+| GIF Assembly Time | 354 s | 132 s |
+| GIF Size | 8.12 MB | 6.57 MB |

@@ -1,14 +1,15 @@
 # Mewsprite
 
-## 项目介绍
-本项目由[Mewgenerate](https://github.com/Sploder12/mewgenerate)分叉，旨在更方便地自定义不同动作与猫族生物（Catgen）的动作，生成gif动画并导出。
+[English](README.md) | [简体中文](README.zh.md)
+## Overview
+This project is a fork from [Mewgenerate](https://github.com/Sploder12/mewgenerate), providing more convient way to make catgen animations and export them as `.gif` image.
 
-## 仓库结构
+## Structure
 ```
 Mewsprite
-  ├─ .github ----------------- // GitHub 配置文件、Agent指令等
-  ├─ cache ------------------- // 缓存的形状文件等
-  ├─ data -------------------- // 解压后的resources.gpak
+  ├─ .github ----------------- // GitHub configures, Agent Instructions, etc.
+  ├─ cache ------------------- // Cached shapes
+  ├─ data -------------------- // Put unpacked resources.gpak files here.
   │   ├─ auto
   │   ├─ data
   │   ├─ levels
@@ -16,41 +17,39 @@ Mewsprite
   │   ├─ swfs
   │   ├─ ...
   │   └─ textures
-  ├─ Mewgenics-Level-Editor -- // _目前还有需要使用这个工具吗？_
   ├─ out
-  │   ├─ batch --------------- // 批量导出，再次运行批量导出前会清理此文件夹
+  │   ├─ batch --------------- // Store batch exported anims, will cleanup if export again.
   │   │   └─ ...
   │   └─ ...
   ├─ reusable
-  └─ src --------------------- // 源码
-      ├─ catgen -------------- // 定义猫族生物的一些工具类和工具函数等
-      └─ util ---------------- // 解析SWF、GON格式文件的一些工具
+  └─ src --------------------- // Source codes
+      ├─ catgen -------------- // Catgen class and functions definition
+      └─ util ---------------- // Tools use to parse .gon, .swf files
 ```
 
-## 使用方法
-### 依赖项
-* [Mewgenics 本体](https://store.steampowered.com/app/686060/Mewgenics/)
+## How to use
+### Dependencies
+* [Mewgenics](https://store.steampowered.com/app/686060/Mewgenics/)
 * [Mewgenics_gpak_util](https://github.com/Tiftid/mewgenics_gpak_util)
 * [JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler)
 
-### 步骤
-1. 从 Steam 安装目录找到`resources.gpak`
-    * 一般在`steamapps/common/Mewgenics/resources.gpak`）。
-2. 使用 gpak util 解压缩此 gpak 包，将提取出的所有文件放在本项目的`./data/`目录下。
-3. 找到[import_paths.py](./src/import_paths.py)，修改 FFDec cli 的路径为实际路径。
-4. 然后即可通过命令行运行（见 [#CLI](#CLI)）。
-<!--TODO: GUI或WebUI？-->
+### Step-to-step instruction
+1. Find `resources.gpak` in Steam installation directory.
+    * Usually located in `steamapps/common/Mewgenics/resources.gpak`.
+2. Use gpak util tool to unpack this file, then move extracted files to `./data/` in root directory.
+3. Open [import_paths.py](./src/import_paths.py), then change the actual installation path of ffdec.
+4. Then feel free making GIFs! ([#CLI](#CLI))
 
-目前本项目已跳过对除`catpart.swf`、`catanis.swf`、`catanis2.swf`等的转储。但首次运行需仍很长时间（>10分钟）以完成转储工作。
+Currently, this project has skipped the dumping of files other than `catpart.swf`, `catanis.swf`, `catanis2.swf`, etc. However, the first run still takes a very long time (more than 10 minutes) to complete the dumping process.
 
-### 缓存
-每次运行程序时，会缓存一些动画元数据、部件形状供未来使用：
-* `./reusable/anims/<anim>.json`：动画元数据，包含此动画所需的部件（定义标签）池（`tag_pool`）、每帧中各对象（控制标签）的所需标签（`tag`）、深度（`depth`）、形状变换矩阵（`transform`，对应`matrix`）。
-* `./reusable/shapes/`：本次使用的所有部件形状的SVG图片。有需求使用在别的地方的话，可以自行使用InkScape修剪图像边界。
-  * 猫的部件形如 `<猫名>-<部件>[-<表情>[-<头>-<面>-<颈>]].svg`。
-  * 武器与饰品类型的部件，形如 `<物品名>.svg`（例：`ButcherHook.svg`、`Chicken.svg`）：它们不属于任何一只猫，多只猫拿同一件武器共用同一份缓存；换武器也不会让猫自身的部件缓存失效。
+### Caching
+Each time the program is run, some animation metadata and component shapes are cached for future use:
+* `./cache/anims/<anim>.json`: Animation metadata, including the component (definition tags) pool (`tag_pool`) required for this animation, the required tags for each object (control tags) in each frame (`tag`), depth (`depth`), and shape transformation matrix (`transform`, corresponding to `matrix`).
+* `./cache/shapes/`: SVG images of all the components used this time. If needed to be used elsewhere, the images can be trimmed by yourself using InkScape.
+* The component of the cat is like `<cat name>-<component>[-<expression>[-<head>-<face>-<neck]].svg`.
+* Components of weapons and accessories, like `<item name>.svg` (e.g., `ButcherHook.svg`, `Chicken.svg`): They do not belong to any specific cat. Multiple cats sharing the same weapon will use the same cached version; changing the weapon will not invalidate the cat's component cache.
 
-交互式模式下，如果本次导出时在`./reuseable`里命中了动画元数据与所有部件形状文件（含武器/饰品），则不再读取原始`.swf`文件。批量模式只寻找动画元数据，部件形状仍然每次依赖原始`.swf`文件。使用`--force-redump`以忽略`./cache`下资产文件缓存。
+In interactive mode, if the animation metadata and all component shape files (including weapons/accessories) are found in `./cache` during this export, the original `.swf` files will not be read. In batch mode, only the animation metadata is searched for, and the component shapes still rely on the original `.swf` files each time. Use `--force-redump` to ignore the asset file cache in `./cache`.
 
 ### CLI
 ```
@@ -62,56 +61,64 @@ python main.py [-h] [-v] [-o OUT_DIR] [--ffdec FFDEC] [--force-redump] [-b]
                [--no-equip] [--no-equip2] [--no-gif]
 
 options:
-  -h, --help                            显示帮助信息（英文）并退出
+  -h, --help                            Display help messages and exit
   -v, --verbose
-  -o, --out-dir OUT_DIR                 指定导出路径的根目录（默认值 ./out）
-  --ffdec FFDEC                         指定 ffdec-cli 可执行文件的路径
-  --force-redump                        忽略资产文件缓存
-  -b, --batch                           有此标记时为批量模式，否则为交互式模式
-  -a, --anim, --anim-name [ANIM_NAME]   指定导出动画的名字
+  -o, --out-dir OUT_DIR                 Specify the root directory of the export path
+                                        (Default: ./out)
+  --ffdec FFDEC                         Specify the path of the ffdec-cli executable
+  --force-redump                        Ignore the asset file cache
+  -b, --batch                           If this flag exists, run in batch mode;
+                                        otherwise, run in interactive mode
+  -a, --anim, --anim-name [ANIM_NAME]   Specify the animation name 
   --cat <cat-id> default
                  custom [head;face;neck]
-                 none                   指定导出猫的名字、装备模式、装备
-                                        <cat-id>: 猫的名字（内部名，例：ButcherCat）
-                                        default: 使用默认装备
-                                        custom [head;face;neck]: 使用指定的三个装备，
-                                            必须一次指定，使用英文分号分隔，每项可留空
-                                        none: 不渲染猫的装备
+                 none                   Specify cat name(id), equip mode, equip items
+                                        <cat-id>  Cat name (internal name e.g. ButcherCat)
+                                        default:  Use default equip items set
+                                        custom [head;face;neck]: Use the specified three 
+                                              equip items. must be specified at once,
+                                              separated by semicolons, each item can be
+                                              left blank.
+                                        none: Do not render any equip item
   --cat <cat-id> [default|custom|none] [head;face;neck]
-                                        预输入第二猫的名字、装备，指定后运行时不再询问
-  --cat-id CAT_ID                       等效 --cat <cat-id>
-  --equip [head;face;neck]              第一猫的装备，格式和顺序同前
-  --weapon [ITEM_NAME|none]             第一猫的武器；省略时使用默认武器（没有则不带）
-  --trinket [ITEM_NAME|none]            第一猫的饰品（默认值 Chicken）
-  --no-equip                            不渲染第一猫的装备（不影响武器/饰品）
-  --cat2-id CAT2_ID                     预输入第二猫的名字；指定后运行时不再询问
-  --equip2 [head;face;neck]             预输入第二猫的装备，格式和顺序同前
-  --no-equip2                           不渲染第二猫的装备
-  --no-gif                              （调试用）跳过组装GIF图片步骤（仍逐帧导出SVG图片）
+                                        Pre-input second cat's name & equip items. If exist 
+                                              it will not be asked again during the run.
+  --cat-id CAT_ID                       Equivalent to --cat <cat-id>
+  --equip [head;face;neck]              Primary cat's equip item, same format and order.
+  --weapon [ITEM_NAME|none]             Primary cat's weapon; if omitted, use class default
+                                              item or none.
+  --trinket [ITEM_NAME|none]            Primary cat's trinket/consumable (Default: Chicken)
+  --no-equip                            Don't render equip items (don't affect weapon/trinket)
+  --cat2-id CAT2_ID                     Pre-input second cat's name. If exist, it will not be
+                                              asked again during the run.
+  --equip2 [head;face;neck]             Pre-input second cat's equip.
+  --no-equip2                           Don't render second cat's equip items.
+  --no-gif                              (DEBUG only)  Skip the step of assembling GIF images
+                                              (still export SVG images frame by frame)
 ```
-快速参考： [ 猫名 ] | [ 动画 ](./reusable/anims.txt) | 装备 - [ 头部 ] [ 面部 ] [ 颈部 ] | 手持 - [ 武器 ] [ 饰品 ]
+Quick Reference: [Cat Name] | [Animation] (./reusable/anims.txt) | Equip - [Head] [Face] [Neck] | Handheld - [Weapon] [ Consumable ]
 
-上述文件会在缺失或首次运行时由程序自动生成。
+Files mentioned above will be automatically generated by the program when they are missing or when it is run for the first time.
 
-**示例：**（在项目的根目录开启终端并运行）
+**Examples:**(Open the terminal in the root directory of the project and run)
 
-<figure>导出 ButcherCat 的 idleF 动画，装备使用默认装备：
+<figure>Export ButcherCat's idleF, using his default equip items:
 
 `python main.py --anim idleF --cat ButcherCat`
 
-导出 ButcherCat 的 idleF 动画，指定头部装备为 CoinBag：
+Export ButcherCat's idleF, while specify the head item as CoinBag and other two as none:
 
 `python main.py --anim idleF --cat ButcherCat custom CoinBag;;`
 
-导出 ButcherCat 对 ThiefCat 的 bearHugF 动画，两只猫均使用默认装备：
+Export ButcherCat and ThiefCat's bearHugF, using both cats' default equip items:
 
 `python main.py --anim bearHugF --cat ButcherCat --cat2 ThiefCat`
 
-导出 ButcherCat 的 ButcherIdleF 动画，武器换成 CaveCatClub（装备保持默认）：
+Export ButcherCat's ButcherIdleF, while specify weapon item as CaveCatClub (still use default equip items):
 
 `python main.py --anim ButcherIdleF --cat ButcherCat --weapon CaveCatClub`
 
-不戴武器，也不穿装备：
+Same as above, with neither equip items nor weapon item:
 
 `python main.py --anim ButcherIdleF --cat ButcherCat none --weapon none`</figure>
 
@@ -126,11 +133,11 @@ options:
 
 Higher-level functionality is also provided in files named based off what they parse for Mewgenics. Ex. `src/keywords.py` handles strings for buffs and debuffs (keywords).
 
-### 类型检查
+### Type Checking
 
-仓库用 [mypy](https://mypy.readthedocs.io/) 做静态类型检查，配置在 `mypy.ini`（`mypy_path = .` + `explicit_package_bases`，因为 `src` 是使用相对导入的包）。
+The repository uses [mypy](https://mypy.readthedocs.io/) for static type checking. The configuration is in `mypy.ini` (with `mypy_path = .` + `explicit_package_bases`, since `src` is a package using relative imports).
 
 ```bash
-.venv/Scripts/python.exe -m mypy                      # 检查 src/、main.py、svg_to_png.py
-.venv/Scripts/python.exe -m mypy -p src.custom_cats   # 只检查单个模块
+.venv/Scripts/python.exe -m mypy                      # Check src/, main.py, svg_to_png.py
+.venv/Scripts/python.exe -m mypy -p src.custom_cats   # Only check a single module
 ```

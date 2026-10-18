@@ -1,12 +1,19 @@
 import os
 
 # ================================================== #
+# Change the actual installation path of ffdec to the
+# specified CLI file of FFDEC instead of the main program.
+#
 # 改成ffdec实际安装的路径，指定FFDEC的cli文件而不是本体。
 ffdecDefault = r"D:/Program Files/FFDec/ffdec-cli.exe" if os.name == "nt" else "ffdec-cli"
 outDirDefault = r"./out"
 # ================================================== #
 
 # ================================================== #
+# Used to fix name when a catgen has different name in NAME2 and NAME1
+# You can try adding the conversion here if there are issues during single run. 
+# Format: "NAME2": "NAME1"
+# 
 # 名称修复，当同一猫在NAME2系列文件与NAME1系列文件中使用不同的名字时进行转换。
 # 如运行遇到问题可尝试在这里添加转换。
 # 格式： "在NAME2的名字": "在NAME1中的名字"
@@ -18,6 +25,8 @@ namefix = {
 # ================================================== #
 
 # ================================================== #
+# Do not modify any path below if you have no idea what they do.
+#
 # 如果你不熟悉，不要修改下面的路径。
 #
 # : Catgen definiton; Required parts, palettes, etc.
