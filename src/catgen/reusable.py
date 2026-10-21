@@ -60,7 +60,7 @@ NO_EQUIPMENT = "None"
 
 #: bump when the way a part sprite is composed changes, so old cached artwork is
 #: discarded instead of silently rendering with the previous composition
-SHAPE_CACHE_VERSION = "7"
+SHAPE_CACHE_VERSION = "8"
 
 #: marker file holding SHAPE_CACHE_VERSION next to the part SVGs
 VERSION_FILE = ".version"

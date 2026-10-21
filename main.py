@@ -3,6 +3,7 @@ import logging
 import os
 
 import src.custom_cats as custom_cats
+import src.catgen.catalogue as catalogue
 import src.util.ffdec_tools as ffdec
 from src.import_paths import *
 from src.custom_cats import NONE_TOKENS
@@ -129,6 +130,14 @@ def main():
 
     if args.force_redump:
         ffdec.FORCE_REDUMP = True
+
+    # The name lists in reusable/ are a convenience for anyone who needs to know
+    # which ids the CLI takes; a failure there must never stop an export.
+    try:
+        catalogue.ensure_name_lists()
+    except Exception as error:
+        logging.warning("Could not refresh the name lists in %s: %s",
+                        catalogue.NAME_LISTS_DIR, error)
 
     # The equipment and the handheld items are asked for separately: a weapon or
     # a trinket never becomes part of a cat's equipment list.

@@ -1,11 +1,19 @@
 ## 0.2.2
-(This modification is assisted by DeepSeek-V41-flash)
+(This modification is assisted by DeepSeek-V4.1-flash)
 
 ### Fixes
+- Fixed the issue where cat's left eye was incorrectly flipped.
 - Fix the issue where the position of the second cat is too low in the animation where the second cat is involved as a whole (e.g. `bearHugF`).
 
+### Additions
+- Now you can export animations from `2d_catanis.swf`. However, some animations may have issues.
+- Now `./reusable/` holds one plain-text list per kind of name the CLI accepts, one name per line.
+
+### Misc.
+- Let `Edmund` and `Tyler` join in the default batch-export cats list.
+
 ## 0.2.1
-(This modification is assisted by DeepSeek-V41-flash)
+(This modification is assisted by DeepSeek-V4.1-flash)
 
 ### Fixes
 - Fixed the issue where the cat's mouth was positioned abnormally high when looking to the left.
@@ -19,7 +27,7 @@
 - Added parsing of the `colorTransform` field from the original SWF, allowing the cat to be colored in the animation.
 
 ## 0.2.0
-(This modification is assisted by DeepSeek-V41-flash)
+(This modification is assisted by DeepSeek-V4.1-flash)
 
 ### Changes
 - Optimized the GIF generation logic of the original project to stream frame-by-frame writing, significantly reducing memory and disk usage.

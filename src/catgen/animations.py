@@ -3,8 +3,18 @@ from . import swf_tree as tree
 import logging
 from typing import Any
 
+_2D_CATANIS_SWF = "./data/swfs/2d_catanis.swf"
 CATANIS_SWF1 = "./data/swfs/catanis.swf"
 CATANIS_SWF2 = "./data/swfs/catanis2.swf"
+HOUSE_INTERSTITIALS = "./data/swfs/house_interstitials.swf"
+
+#: Every SWF that holds cat animations, as ``(path, root sprite)`` in read order:
+#: later files override the animations they redefine.
+CATANIS_SOURCES: tuple[tuple[str, str], ...] = (
+    (CATANIS_SWF1, "CatTest"),
+    (CATANIS_SWF2, "_Append_CatTest"),
+    (_2D_CATANIS_SWF, "FlatCat"),
+)
 
 #: One placement of a part: its matrix, its display-list depth and the SWF
 #: `colorTransform` that goes with it (``None`` when the tag carries none).
@@ -230,8 +240,12 @@ def aniFromSprite(defSprite: tree.SWF_Tree.SpriteNode) -> list[CatFrame]:
     return out
 
 
-def anisFromSprite(swfTree: tree.SWF_Tree, defSprite: tree.SWF_Tree.SpriteNode) -> dict[str, list[CatFrame]]:
-    out: dict[str, list[CatFrame]] = {}
+def _iterAnimFrames(swfTree: tree.SWF_Tree, defSprite: tree.SWF_Tree.SpriteNode, prefix: str = ""):
+    """Yield ``(name, sprite node or None)`` for every animation of a root sprite.
+
+    The one place that decides which frames of a root sprite count as animations,
+    so the frame builder and the plain name listing can never drift apart.
+    """
     for frame in defSprite.frames:
         if (frame.name == ""):
             continue
@@ -239,28 +253,61 @@ def anisFromSprite(swfTree: tree.SWF_Tree, defSprite: tree.SWF_Tree.SpriteNode) 
         if (len(frame.objs) > 1):
             logging.warning("Animation has many animations: " + frame.name)
             continue
-            raise RuntimeError("Animation has many animations: " + frame.name)
 
         if (len(frame.objs) == 0):
-            out[frame.name] = []
+            yield prefix + frame.name, None
             continue
 
         node = swfTree.get(frame.objs[0].id)
         if isinstance(node, tree.SWF_Tree.SpriteNode):
-            out[frame.name] = aniFromSprite(node)
+            yield prefix + frame.name, node
+
+
+def anisFromSprite(swfTree: tree.SWF_Tree, defSprite: tree.SWF_Tree.SpriteNode, prefix: str = "") -> dict[str, list[CatFrame]]:
+    out: dict[str, list[CatFrame]] = {}
+    for name, node in _iterAnimFrames(swfTree, defSprite, prefix):
+        out[name] = [] if node is None else aniFromSprite(node)
 
     return out
+
+
+def getCatAnimSources() -> list[tuple[str, list[str]]]:
+    """Animation names per source SWF, as ``(swf path, names)`` in read order.
+
+    Listing names does not build any frame, so this is much cheaper than
+    `getCatAnims` while covering exactly the same animations.  A name that a later
+    SWF redefines is attributed to that later file -- the one whose frames win when
+    `getCatAnims` merges them.
+    """
+    groups: list[tuple[str, list[str]]] = []
+    owner: dict[str, int] = {}
+
+    for swfPath, rootName in CATANIS_SOURCES:
+        swfTree = tree.getSwfTree(swfPath)
+        root = swfTree.get(rootName)
+        if not isinstance(root, tree.SWF_Tree.SpriteNode):
+            logging.warning(
+                "SWF '%s' has no '%s' sprite; skipping it", swfPath, rootName)
+            continue
+
+        names = [name for name, _node in _iterAnimFrames(swfTree, root)]
+        groups.append((swfPath, names))
+        for name in names:
+            owner[name] = len(groups) - 1
+
+    return [(swfPath, sorted({name for name in names if owner[name] == index}))
+            for index, (swfPath, names) in enumerate(groups)]
 
 
 def getCatAnims() -> dict[str, list[CatFrame]]:
     out: dict[str, list[CatFrame]] = {}
 
-    for swfPath, rootName in ((CATANIS_SWF1, "CatTest"), (CATANIS_SWF2, "_Append_CatTest")):
+    for swfPath, rootName in CATANIS_SOURCES:
         swfTree = tree.getSwfTree(swfPath)
         root = swfTree.get(rootName)
         if not isinstance(root, tree.SWF_Tree.SpriteNode):
-            logging.warning("SWF '%s' has no '%s' sprite; skipping it", swfPath, rootName)
+            logging.warning(
+                "SWF '%s' has no '%s' sprite; skipping it", swfPath, rootName)
             continue
         out |= anisFromSprite(swfTree, root)
-
     return out

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 BATCH_CAT_NAMES = ["Pebbles", "TankCat", "FighterCat", "MageCat", "HunterCat",
                    "MedicCat", "ThiefCat", "NecroCat", "ButcherCat", "JesterCat",
                    "TinkererCat", "DruidCat", "MonkCat", "PsychicCat", "TrailerCat",
-                   "TerminatorCat", "Terminator2Cat", "Dclaude"]
+                   "TerminatorCat", "Terminator2Cat", "Dclaude", "Edmund", "Tyler"]
 
 #: half-size of the window used to measure how far a frame's artwork reaches;
 #: it doubles automatically when a frame touches the border.
@@ -727,11 +727,13 @@ def makeCatHead(cat: CustomCat, partDir: str, palettes: list[palette.Palette], c
     if (placements.reye != None):
         face.reye_open = copy.deepcopy(_get_cached_cat_component(
             partDir, catTree, "CatEye_Right", cat, cat.righteye.frame, cat.righteye.texture))
+        mirror_sprite_x(face.reye_open)
         face.reye_open.applyTransform(
             placements.reye.xform).applyTransform(placements.reye.cxform)
 
         face.reye_closed = copy.deepcopy(_get_cached_cat_component(
             partDir, catTree, "CatEyeClosed_Right", cat, cat.righteye.frame, cat.righteye.texture))
+        mirror_sprite_x(face.reye_closed)
         face.reye_closed.applyTransform(
             placements.reye.xform).applyTransform(placements.reye.cxform)
 
